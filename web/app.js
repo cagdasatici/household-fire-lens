@@ -360,12 +360,18 @@ async function loadReview() {
   }
   list.innerHTML = data.review_items
     .map(
-      (item) => `
+      (item) => {
+        const groupCount = Number(item.suggested_action?.group_count || 1);
+        const groupText =
+          groupCount > 1
+            ? ` · ${groupCount} similar · ${fmtPrecise(item.suggested_action.group_materiality)} total`
+            : "";
+        return `
         <article class="review-item">
           <div>
             <strong>${escapeHtml(item.normalized_merchant || item.description || "Transaction")}</strong>
-            <span>${escapeHtml(item.transaction_date)} · ${fmtPrecise(item.amount)} · ${escapeHtml(item.reason || "Needs classification")}</span>
-            <small>Current: ${escapeHtml(item.economic_class || "unknown")} / ${escapeHtml(item.category || "Uncategorized")}</small>
+            <span>${escapeHtml(item.transaction_date)} · ${fmtPrecise(item.amount)}${escapeHtml(groupText)} · ${escapeHtml(item.reason || "Needs classification")}</span>
+            <small>${escapeHtml(item.account_name || "Account")} · ${escapeHtml(item.account_role || "unknown")} · Current: ${escapeHtml(item.economic_class || "unknown")} / ${escapeHtml(item.category || "Uncategorized")}</small>
           </div>
           <div class="review-actions">
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Groceries">Groceries</button>
@@ -376,7 +382,8 @@ async function loadReview() {
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements">Reimb.</button>
           </div>
         </article>
-      `,
+      `;
+      },
     )
     .join("");
 }

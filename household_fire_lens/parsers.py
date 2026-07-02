@@ -9,7 +9,76 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-PARSER_VERSION = "2026.07.02.2"
+PARSER_VERSION = "2026.07.02.3"
+IBAN_PATTERN = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
+IBAN_TEXT_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?:[\s-]?[A-Z0-9]){10,30}\b")
+IBAN_LENGTHS = {
+    "AD": 24,
+    "AE": 23,
+    "AL": 28,
+    "AT": 20,
+    "AZ": 28,
+    "BA": 20,
+    "BE": 16,
+    "BG": 22,
+    "BH": 22,
+    "BR": 29,
+    "CH": 21,
+    "CR": 22,
+    "CY": 28,
+    "CZ": 24,
+    "DE": 22,
+    "DK": 18,
+    "DO": 28,
+    "EE": 20,
+    "ES": 24,
+    "FI": 18,
+    "FO": 18,
+    "FR": 27,
+    "GB": 22,
+    "GE": 22,
+    "GI": 23,
+    "GL": 18,
+    "GR": 27,
+    "GT": 28,
+    "HR": 21,
+    "HU": 28,
+    "IE": 22,
+    "IL": 23,
+    "IS": 26,
+    "IT": 27,
+    "KW": 30,
+    "KZ": 20,
+    "LB": 28,
+    "LI": 21,
+    "LT": 20,
+    "LU": 20,
+    "LV": 21,
+    "MC": 27,
+    "MD": 24,
+    "ME": 22,
+    "MK": 19,
+    "MR": 27,
+    "MT": 31,
+    "MU": 30,
+    "NL": 18,
+    "NO": 15,
+    "PK": 24,
+    "PL": 28,
+    "PS": 29,
+    "PT": 25,
+    "QA": 29,
+    "RO": 24,
+    "RS": 22,
+    "SA": 24,
+    "SE": 24,
+    "SI": 19,
+    "SK": 24,
+    "SM": 27,
+    "TN": 24,
+    "TR": 26,
+    "UA": 29,
+}
 
 
 @dataclass
@@ -66,6 +135,29 @@ def normalize_merchant(value: str) -> str:
     text = re.sub(r"[^A-Z0-9&.+ ]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:120]
+
+
+def extract_ibans(*values: str) -> List[str]:
+    text = " ".join(value or "" for value in values).upper()
+    found: List[str] = []
+    for match in IBAN_TEXT_PATTERN.finditer(text):
+        compact = re.sub(r"[^A-Z0-9]", "", match.group(0))
+        country = compact[:2]
+        length = IBAN_LENGTHS.get(country)
+        if not length:
+            continue
+        candidate = compact[:length]
+        if len(candidate) == length and IBAN_PATTERN.fullmatch(candidate):
+            found.append(candidate)
+    return list(dict.fromkeys(found))
+
+
+def extract_iban(*values: str, exclude: Iterable[str] = ()) -> str:
+    excluded = {re.sub(r"[^A-Z0-9]", "", value.upper()) for value in exclude if value}
+    for iban in extract_ibans(*values):
+        if iban not in excluded:
+            return iban
+    return ""
 
 
 def decode_csv(content: bytes) -> str:
@@ -255,6 +347,7 @@ def parse_ing(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
     date = parse_date(first_value(row, "datum", "date", "booking_date"))
     debit_credit = first_value(row, "af_bij", "debit_credit", "credit_debit")
     amount = parse_amount(first_value(row, "bedrag_eur", "amount_eur", "bedrag", "amount"), debit_credit)
+    own_account = first_value(row, "rekening", "account") or account_hint or "ING account"
     description = " ".join(
         part
         for part in [
@@ -265,8 +358,14 @@ def parse_ing(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
         if part
     )
     counterparty = first_value(row, "naam_omschrijving", "tegenpartij", "counterparty")
-    own_account = first_value(row, "rekening", "account") or account_hint or "ING account"
-    counterparty_account = first_value(row, "tegenrekening", "counter_account")
+    counterparty_account = first_value(
+        row,
+        "tegenrekening",
+        "tegenrekeningnummer",
+        "counter_account",
+        "counterparty_account",
+        "counterparty_account_number",
+    ) or extract_iban(description, exclude=(own_account,))
     return ParsedTransaction(
         row_number=row_number,
         raw=row,
@@ -289,6 +388,7 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
     raw_amount = first_value(row, "bedrag", "amount", "mutatiebedrag")
     debit_credit = first_value(row, "af_bij", "debit_credit")
     amount = parse_amount(raw_amount, debit_credit)
+    own_account = first_value(row, "rekeningnummer", "account", "account_number") or account_hint or "ABN account"
     description = " ".join(
         part
         for part in [
@@ -299,8 +399,14 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
         if part
     )
     counterparty = first_value(row, "naam_tegenpartij", "tegenpartij", "counterparty_name", "counterparty")
-    own_account = first_value(row, "rekeningnummer", "account", "account_number") or account_hint or "ABN account"
-    counterparty_account = first_value(row, "tegenrekeningnummer", "tegenrekening", "counter_account")
+    counterparty_account = first_value(
+        row,
+        "tegenrekeningnummer",
+        "tegenrekening",
+        "counter_account",
+        "counterparty_account",
+        "counterparty_account_number",
+    ) or extract_iban(description, exclude=(own_account,))
     currency = first_value(row, "valuta", "currency") or "EUR"
     booking_date = first_value(row, "booking_date", "boekdatum", "datum", "date", "transaction_date")
     return ParsedTransaction(
@@ -386,6 +492,14 @@ def parse_generic(row: Dict[str, str], row_number: int, account_hint: str, insti
     description = first_value(row, "description", "omschrijving", "name_description", "merchant", "details")
     counterparty = first_value(row, "counterparty", "merchant", "naam_tegenpartij", "name")
     account = first_value(row, "account", "rekening", "rekeningnummer", "account_number") or account_hint or f"{institution} account"
+    counterparty_account = first_value(
+        row,
+        "counter_account",
+        "counterparty_account",
+        "counterparty_account_number",
+        "tegenrekening",
+        "tegenrekeningnummer",
+    ) or extract_iban(description, exclude=(account,))
     return ParsedTransaction(
         row_number=row_number,
         raw=row,
@@ -397,7 +511,7 @@ def parse_generic(row: Dict[str, str], row_number: int, account_hint: str, insti
         amount=amount,
         currency=first_value(row, "currency", "valuta") or "EUR",
         counterparty_name=counterparty,
-        counterparty_account=first_value(row, "counter_account", "tegenrekening", "tegenrekeningnummer"),
+        counterparty_account=counterparty_account,
         description=description or counterparty,
         reference=first_value(row, "reference", "referentie", "id"),
     )

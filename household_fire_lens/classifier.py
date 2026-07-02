@@ -45,6 +45,7 @@ REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "C
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
 RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
+MAX_OPEN_REVIEW_GROUPS = 150
 
 
 @dataclass
@@ -367,12 +368,18 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
         return False
     text = tx_text(tx)
     transaction_id = conditions.get("transaction_id")
+    account_id = conditions.get("account_id")
+    counterparty_account_hash = conditions.get("counterparty_account_hash")
     merchant_contains = str(conditions.get("merchant_contains", "")).upper()
     description_contains = str(conditions.get("description_contains", "")).upper()
     min_amount = conditions.get("min_abs_amount")
     account_role = conditions.get("account_role")
     direction = conditions.get("direction")
     if transaction_id is not None and int(transaction_id) != int(tx["id"]):
+        return False
+    if account_id is not None and int(account_id) != int(tx["account_id"]):
+        return False
+    if counterparty_account_hash and counterparty_account_hash != tx.get("counterparty_account_hash"):
         return False
     if merchant_contains and merchant_contains not in text:
         return False
@@ -389,6 +396,10 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
 
 def rule_is_safely_scoped(conditions: Dict) -> bool:
     if conditions.get("transaction_id") is not None:
+        return True
+    if conditions.get("account_id") is not None:
+        return True
+    if conditions.get("counterparty_account_hash"):
         return True
     merchant_contains = str(conditions.get("merchant_contains", "")).strip().upper()
     description_contains = str(conditions.get("description_contains", "")).strip().upper()
@@ -411,10 +422,56 @@ def merchant_is_safe_scope(merchant: str) -> bool:
     return any(char.isalpha() for char in merchant)
 
 
+def merchant_is_investment_scope(merchant: str, text: str = "") -> bool:
+    scope_text = f"{merchant} {text}".upper()
+    return any(keyword in scope_text for keyword in INVESTMENT_KEYWORDS)
+
+
+def account_is_safe_to_promote_as_investment(conn: sqlite3.Connection, tx: Dict) -> bool:
+    role = tx.get("account_role")
+    institution = str(tx.get("institution") or "").lower()
+    account_name = str(tx.get("account_name") or "")
+    account_text = f"{institution} {account_name}".upper()
+    if role == "investment" or institution in {"ibkr", "degiro"}:
+        return True
+    if any(keyword in account_text for keyword in INVESTMENT_KEYWORDS):
+        return True
+    if role in {"checking", "savings", "mortgage", "credit_card_proxy"}:
+        return False
+    ordinary_evidence = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.account_id = ?
+          AND nt.is_duplicate = 0
+          AND ta.confidence >= 0.70
+          AND ta.economic_class IN (
+            'income', 'household_spend', 'debt_service',
+            'reimbursement_pass_through', 'refund'
+          )
+        """,
+        (tx["account_id"],),
+    ).fetchone()["count"]
+    return int(ordinary_evidence) == 0
+
+
+def review_group_key(row: sqlite3.Row) -> Tuple:
+    counterparty_hash = row["counterparty_account_hash"] or ""
+    if counterparty_hash:
+        return ("counterparty", counterparty_hash)
+    merchant = row["normalized_merchant"] or ""
+    if merchant_is_safe_scope(merchant):
+        return ("merchant", merchant, row["direction"])
+    return ("transaction", row["id"])
+
+
 def create_review_items(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """
-        SELECT nt.id, nt.amount, nt.normalized_merchant, ta.economic_class, ta.confidence, ta.explanation
+        SELECT
+            nt.id, nt.amount, nt.direction, nt.normalized_merchant, nt.counterparty_account_hash,
+            ta.economic_class, ta.confidence, ta.explanation
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
@@ -426,23 +483,50 @@ def create_review_items(conn: sqlite3.Connection) -> None:
         ORDER BY ABS(nt.amount) DESC
         """
     ).fetchall()
+
+    grouped: Dict[Tuple, Dict] = {}
     for row in rows:
+        key = review_group_key(row)
         amount = abs(float(row["amount"]))
+        group = grouped.get(key)
+        if not group:
+            grouped[key] = {
+                "row": row,
+                "count": 1,
+                "materiality": amount,
+                "max_amount": amount,
+            }
+            continue
+        group["count"] += 1
+        group["materiality"] += amount
+        if amount > group["max_amount"]:
+            group["row"] = row
+            group["max_amount"] = amount
+
+    review_groups = sorted(grouped.values(), key=lambda item: item["materiality"], reverse=True)
+    for group in review_groups[:MAX_OPEN_REVIEW_GROUPS]:
+        row = group["row"]
+        amount = float(group["materiality"])
         issue_type = "classification"
         if row["economic_class"] == "needs_review":
             issue_type = "needs_review"
         suggested = {
             "economic_class": "household_spend" if float(row["amount"]) < 0 else "income",
             "category": "Uncategorized",
-            "create_rule": bool(row["normalized_merchant"]),
+            "create_rule": bool(row["normalized_merchant"] or row["counterparty_account_hash"]),
+            "group_count": group["count"],
+            "group_materiality": round(amount, 2),
         }
+        reason = row["explanation"]
+        if group["count"] > 1:
+            reason = f"{reason}; grouped {group['count']} similar transactions"
         conn.execute(
             """
             INSERT INTO review_items (
                 transaction_id, issue_type, materiality, suggested_action_json, reason, status
             ) VALUES (?, ?, ?, ?, ?, 'open')
             """,
-            (row["id"], issue_type, amount, json_dumps(suggested), row["explanation"]),
+            (row["id"], issue_type, amount, json_dumps(suggested), reason),
         )
 
 
@@ -455,14 +539,46 @@ def create_rule_from_review(
     merchant_scope: bool = True,
 ) -> int:
     tx = conn.execute(
-        "SELECT normalized_merchant, direction FROM normalized_transactions WHERE id = ?",
+        """
+        SELECT
+            nt.id, nt.account_id, nt.counterparty_account_hash, nt.normalized_merchant,
+            nt.direction, nt.description, nt.counterparty_name,
+            a.role AS account_role, a.institution, a.display_name AS account_name
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        WHERE nt.id = ?
+        """,
         (transaction_id,),
     ).fetchone()
     if not tx:
         raise ValueError("Transaction not found")
+    tx_dict = dict(tx)
     merchant = tx["normalized_merchant"] or ""
-    if economic_class in RISKY_REVIEW_CLASSES or not (merchant_scope and merchant_is_safe_scope(merchant)):
+    counterparty_hash = tx["counterparty_account_hash"] or ""
+    text = tx_text(tx_dict)
+    name_scope = merchant or "transaction"
+
+    if economic_class == "wealth_allocation" and counterparty_hash:
+        conditions = {"counterparty_account_hash": counterparty_hash}
+        name_scope = "matching counterparty account"
+    elif economic_class == "wealth_allocation" and account_is_safe_to_promote_as_investment(conn, tx_dict):
+        conditions = {"account_id": tx["account_id"]}
+        name_scope = f"{tx['account_name']} account"
+        if tx["account_role"] != "investment":
+            conn.execute("UPDATE accounts SET role = 'investment' WHERE id = ?", (tx["account_id"],))
+    elif (
+        economic_class == "wealth_allocation"
+        and merchant_scope
+        and merchant_is_safe_scope(merchant)
+        and merchant_is_investment_scope(merchant, text)
+    ):
+        conditions = {"merchant_contains": merchant, "direction": tx["direction"]}
+    elif economic_class in RISKY_REVIEW_CLASSES and counterparty_hash:
+        conditions = {"counterparty_account_hash": counterparty_hash, "direction": tx["direction"]}
+        name_scope = "matching counterparty account"
+    elif economic_class in RISKY_REVIEW_CLASSES or not (merchant_scope and merchant_is_safe_scope(merchant)):
         conditions = {"transaction_id": transaction_id}
+        name_scope = f"transaction {transaction_id}"
     else:
         conditions = {"merchant_contains": merchant, "direction": tx["direction"]}
     actions = {
@@ -476,6 +592,6 @@ def create_rule_from_review(
             name, priority, conditions_json, actions_json, confidence, created_by, enabled
         ) VALUES (?, 50, ?, ?, 0.96, 'user', 1)
         """,
-        (f"Classify {merchant or 'transaction'} as {category}", json_dumps(conditions), json_dumps(actions)),
+        (f"Classify {name_scope} as {category}", json_dumps(conditions), json_dumps(actions)),
     )
     return int(cursor.lastrowid)

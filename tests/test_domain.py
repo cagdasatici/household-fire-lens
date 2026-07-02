@@ -39,6 +39,11 @@ ING_AMOUNT_EUR_CSV = """Date,Name / Description,Account,Counterparty,Code,Debit/
 """
 
 
+ING_DESCRIPTION_IBAN_CSV = """Date,Name / Description,Account,Counterparty,Code,Debit/credit,Amount (EUR),Transaction type,Notifications,Resulting balance,Tag
+2026-07-02,Own Transfer,NL00INGB0000000000,,GT,Debit,"1500,00",Transfer,"Account: NL00INGB0000000000 Name: Me IBAN: NL91ABNA0417164300 Value date: 02/07/2026","8500,00",
+"""
+
+
 class DomainTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -177,6 +182,15 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(parsed[1].amount, -12.34)
         self.assertIn("Salary text", parsed[0].description)
 
+    def test_ing_description_iban_becomes_counterparty_account(self):
+        institution, parsed = parse_transactions(
+            "NL00INGB0000000000_01-07-2025_01-07-2026.csv",
+            ING_DESCRIPTION_IBAN_CSV.encode("utf-8"),
+            institution="ing",
+        )
+        self.assertEqual(institution, "ing")
+        self.assertEqual(parsed[0].counterparty_account, "NL91ABNA0417164300")
+
     def test_unscoped_review_rule_does_not_classify_everything(self):
         self.import_and_classify()
         self.conn.execute(
@@ -230,6 +244,68 @@ class DomainTests(unittest.TestCase):
             """
         ).fetchone()["count"]
         self.assertEqual(wealth_count, 1)
+
+    def test_investment_review_rule_reuses_counterparty_account_hash(self):
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2026-04-01,Main,Transfer to investment,,NL91ABNA0417164300,-250.00,EUR
+2026-04-02,Main,Another transfer,,NL91ABNA0417164300,-80.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-counterparty-investment.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = -250"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(self.conn, tx_id, "wealth_allocation", "Investments")
+        self.conn.commit()
+        classify_all(self.conn)
+        rule = self.conn.execute("SELECT conditions_json FROM classification_rules WHERE id = ?", (rule_id,)).fetchone()
+        self.assertIn("counterparty_account_hash", rule["conditions_json"])
+        wealth_count = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM transaction_annotations
+            WHERE economic_class = 'wealth_allocation'
+            """
+        ).fetchone()["count"]
+        self.assertEqual(wealth_count, 2)
+
+    def test_investment_review_promotes_unknown_dedicated_account(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Broker Cash,Trade settlement,,250.00,EUR
+2026-04-02,Broker Cash,Trade fee,,-2.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-broker-cash.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="unknown",
+        )
+        classify_all(self.conn)
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = 250"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(self.conn, tx_id, "wealth_allocation", "Investments")
+        self.conn.commit()
+        classify_all(self.conn)
+        rule = self.conn.execute("SELECT conditions_json FROM classification_rules WHERE id = ?", (rule_id,)).fetchone()
+        account = self.conn.execute("SELECT role FROM accounts").fetchone()
+        self.assertIn("account_id", rule["conditions_json"])
+        self.assertEqual(account["role"], "investment")
+        wealth_count = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM transaction_annotations
+            WHERE economic_class = 'wealth_allocation'
+            """
+        ).fetchone()["count"]
+        self.assertEqual(wealth_count, 2)
 
 
 if __name__ == "__main__":

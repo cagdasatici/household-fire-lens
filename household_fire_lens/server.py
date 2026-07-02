@@ -324,9 +324,11 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             SELECT
                 ri.*,
                 nt.transaction_date, nt.amount, nt.description, nt.normalized_merchant,
+                a.display_name AS account_name, a.role AS account_role,
                 ta.economic_class, ta.category, ta.subcategory, ta.confidence
             FROM review_items ri
             LEFT JOIN normalized_transactions nt ON nt.id = ri.transaction_id
+            LEFT JOIN accounts a ON a.id = nt.account_id
             LEFT JOIN transaction_annotations ta ON ta.transaction_id = nt.id
             WHERE ri.status = 'open'
             ORDER BY ri.materiality DESC, ri.id

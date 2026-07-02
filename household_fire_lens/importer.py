@@ -100,7 +100,11 @@ def import_csv(
 
         merchant = normalize_merchant(tx.counterparty_name or tx.description)
         direction = "inflow" if tx.amount >= 0 else "outflow"
-        counterparty_account_hash = stable_hash(tx.counterparty_account) if tx.counterparty_account else None
+        counterparty_account_hash = None
+        if tx.counterparty_account:
+            candidate_hash = stable_hash(tx.counterparty_account)
+            if candidate_hash != account_hash:
+                counterparty_account_hash = candidate_hash
         source_fingerprint = fingerprint(
             [
                 str(account_id),
