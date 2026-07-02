@@ -32,6 +32,20 @@ GENERIC_LOOKUP_NAMES = {
     "MASTERCARD",
     "VISA",
 }
+UNSAFE_LOOKUP_PATTERNS = (
+    r"\bAPPLE PAY\b",
+    r"\bGOOGLE PAY\b",
+    r"\bPAY\.NL\b",
+    r"\bPAS[A-Z0-9]*\b",
+    r"\bNR\b",
+    r"\bBEA\b",
+    r"\bVALUE DATE\b",
+    r"\bTRANSACTION\b",
+    r"\bSEPA\b",
+    r"\bIBAN\b",
+    r"\bBIC\b",
+    r"\b\d{1,2}[.:]\d{2}\b",
+)
 
 CATEGORY_SIGNALS: List[Tuple[Tuple[str, ...], str, str, str, float]] = [
     (("dentist", "dental", "orthodont", "hospital", "pharmacy", "healthcare", "medical clinic"), "household_spend", "Health", "", 0.74),
@@ -86,6 +100,10 @@ def is_lookup_safe(merchant_name: str) -> bool:
     if re.search(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", key):
         return False
     if re.search(r"\d{5,}", key):
+        return False
+    if sum(char.isdigit() for char in key) >= 4:
+        return False
+    if any(re.search(pattern, key) for pattern in UNSAFE_LOOKUP_PATTERNS):
         return False
     if not re.search(r"[A-Z]{3}", key):
         return False

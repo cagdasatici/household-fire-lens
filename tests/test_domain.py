@@ -5,7 +5,7 @@ from pathlib import Path
 from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
-from household_fire_lens.entity_resolver import resolve_merchant
+from household_fire_lens.entity_resolver import is_lookup_safe, resolve_merchant
 from household_fire_lens.importer import import_csv
 from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
@@ -283,6 +283,12 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(result["status"], "resolved")
         self.assertEqual(result["category"], "Health")
         self.assertEqual(result["source"], "openstreetmap_nominatim")
+
+    def test_online_lookup_rejects_card_terminal_descriptions(self):
+        self.assertFalse(
+            is_lookup_safe("BEA APPLE PAY PAY.NL SPARNAAIJ JUWEL PAS441 NR 08TVT7 20.12.25 15 38 AALSMEER")
+        )
+        self.assertTrue(is_lookup_safe("VAN DULKEN"))
 
     def test_svb_child_benefit_is_income_not_review(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
