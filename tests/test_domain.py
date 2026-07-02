@@ -157,6 +157,47 @@ class DomainTests(unittest.TestCase):
         self.assertIn("Unknown Card Spend", categories)
         self.assertGreaterEqual(insights["summary"]["months_loaded"], 3)
 
+    def test_holiday_and_other_buckets_are_available(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,Hotel booking,Booking.com,-450.00,EUR
+2026-05-02,Main,Tiny unknown merchant,Mystery,-12.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-holiday-other.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        categories = {
+            row["category"]
+            for row in self.conn.execute(
+                "SELECT category FROM transaction_annotations"
+            ).fetchall()
+        }
+        self.assertIn("Holiday", categories)
+        self.assertIn("Other", categories)
+
+    def test_savings_keyword_uses_inter_account_transfer_bucket(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,Savings transfer to own account,Own savings,-250.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-transfer-bucket.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations"
+        ).fetchone()
+        self.assertEqual(row["economic_class"], "internal_transfer")
+        self.assertEqual(row["category"], "Inter-account Transfers")
+        self.assertEqual(row["subcategory"], "Savings")
+
     def test_headerless_abn_tab_export_parses(self):
         institution, parsed = parse_transactions(
             "TXT260702214417.TAB",

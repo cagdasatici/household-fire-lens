@@ -376,8 +376,10 @@ async function loadReview() {
           <div class="review-actions">
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Groceries">Groceries</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Eating Out">Eating out</button>
+            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Holiday">Holiday</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Shopping">Shopping</button>
-            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="internal_transfer" data-category="Transfers">Transfer</button>
+            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Other">Other</button>
+            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="internal_transfer" data-category="Inter-account Transfers">Inter-acct</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="wealth_allocation" data-category="Investments">Investment</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements">Reimb.</button>
           </div>

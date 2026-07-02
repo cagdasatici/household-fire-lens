@@ -26,6 +26,7 @@ ECONOMIC_CLASSES = {
 MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
     (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK"), "Groceries", ""),
     (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA"), "Eating Out", ""),
+    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE"), "Holiday", ""),
     (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT"), "Transportation", ""),
     (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION"), "Subscriptions", ""),
     (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO"), "Housing", "Utilities"),
@@ -198,7 +199,7 @@ def classify_transaction(
     if tx["id"] in transfer_set:
         if role == "investment" or any(keyword in text for keyword in INVESTMENT_KEYWORDS):
             return Annotation("wealth_allocation", "Investments", "", 0.96, "Matched own-account investment transfer")
-        return Annotation("internal_transfer", "Transfers", "", 0.96, "Matched own-account transfer pair")
+        return Annotation("internal_transfer", "Inter-account Transfers", "", 0.96, "Matched own-account transfer pair")
 
     if role == "investment":
         return Annotation("wealth_allocation", "Investments", "", 0.78, "Investment account activity")
@@ -213,7 +214,7 @@ def classify_transaction(
         return Annotation("household_spend", "Unknown Card Spend", "", 0.72, "Credit card settlement; detailed card import optional")
 
     if any(keyword in text for keyword in SAVINGS_KEYWORDS):
-        return Annotation("internal_transfer", "Transfers", "Savings", 0.74, "Savings or own-account keyword")
+        return Annotation("internal_transfer", "Inter-account Transfers", "Savings", 0.74, "Savings or own-account keyword")
 
     if amount > 0:
         return Annotation("needs_review", "Uncategorized", "", 0.45, "Positive transaction is not salary or reimbursement")
@@ -224,7 +225,7 @@ def classify_transaction(
 
     if abs(amount) >= 50:
         return Annotation("needs_review", "Uncategorized", "", 0.4, "Material outflow needs classification")
-    return Annotation("household_spend", "Uncategorized", "", 0.46, "Low-value uncategorized spend")
+    return Annotation("household_spend", "Other", "", 0.46, "Low-value uncategorized spend")
 
 
 def tx_text(tx: Dict) -> str:
