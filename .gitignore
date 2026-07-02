@@ -1,0 +1,95 @@
+# Local financial data and imports
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.ofx
+*.qif
+*.pdf
+uploads/
+imports/
+statements/
+exports/
+data/
+local-data/
+private/
+
+# Bank/investment/export naming patterns
+*abn*.csv
+*ABN*.csv
+*ing*.csv
+*ING*.csv
+*degiro*.csv
+*DeGiro*.csv
+*DEGIRO*.csv
+*ibkr*.csv
+*IBKR*.csv
+*interactive-brokers*.csv
+*InteractiveBrokers*.csv
+*booking*.csv
+*Booking*.csv
+*abn*.pdf
+*ABN*.pdf
+*ing*.pdf
+*ING*.pdf
+*degiro*.pdf
+*DeGiro*.pdf
+*DEGIRO*.pdf
+*ibkr*.pdf
+*IBKR*.pdf
+*booking*.pdf
+*Booking*.pdf
+
+# Allow synthetic, non-personal project fixtures
+!tests/
+!tests/fixtures/
+!tests/fixtures/**
+!docs/
+!docs/**
+
+# Local databases and runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+.household-fire-lens/
+
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+credentials.*
+token.*
+api_key.*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Node/frontend tooling, if added later
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Codex scratch/output folders
+work/
+outputs/

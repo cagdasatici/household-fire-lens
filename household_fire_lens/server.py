@@ -1,0 +1,344 @@
+from __future__ import annotations
+
+import cgi
+import json
+import mimetypes
+import os
+import sqlite3
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any, Dict, Optional
+from urllib.parse import parse_qs, urlparse
+
+from .aggregation import fire_snapshot, recompute_monthly_snapshots, spending_breakdown
+from .classifier import classify_all, create_rule_from_review
+from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
+from .importer import import_csv
+
+
+APP_ROOT = Path(__file__).resolve().parent.parent
+WEB_ROOT = APP_ROOT / "web"
+DEFAULT_DB = APP_ROOT / ".household-fire-lens" / "household-fire-lens.sqlite3"
+
+
+def get_database_path() -> str:
+    return os.environ.get("HOUSEHOLD_FIRE_LENS_DB", str(DEFAULT_DB))
+
+
+class HouseholdFireLensHandler(BaseHTTPRequestHandler):
+    server_version = "HouseholdFireLens/0.1"
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/api/"):
+                self.handle_api_get(parsed.path, parse_qs(parsed.query))
+            else:
+                self.serve_static(parsed.path)
+        except Exception as exc:  # pragma: no cover - defensive server boundary
+            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/imports":
+                self.handle_import()
+            elif parsed.path.startswith("/api/review-items/") and parsed.path.endswith("/resolve"):
+                review_id = int(parsed.path.split("/")[3])
+                self.handle_review_resolve(review_id)
+            elif parsed.path == "/api/rules":
+                self.handle_create_rule()
+            elif parsed.path == "/api/reclassify":
+                self.handle_reclassify()
+            else:
+                self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # pragma: no cover
+            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/api/accounts/"):
+                account_id = int(parsed.path.split("/")[-1])
+                self.handle_account_patch(account_id)
+            elif parsed.path.startswith("/api/rules/"):
+                rule_id = int(parsed.path.split("/")[-1])
+                self.handle_rule_patch(rule_id)
+            else:
+                self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # pragma: no cover
+            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"[household-fire-lens] {self.address_string()} - {fmt % args}")
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        if not hasattr(self.server, "conn"):
+            self.server.conn = connect_database(get_database_path())  # type: ignore[attr-defined]
+        return self.server.conn  # type: ignore[attr-defined]
+
+    def handle_api_get(self, path: str, query: Dict[str, Any]) -> None:
+        if path == "/api/health":
+            self.send_json({"ok": True, "database": get_database_path()})
+        elif path == "/api/imports":
+            self.send_json({"imports": fetch_all(self.conn, "SELECT * FROM source_files ORDER BY imported_at DESC")})
+        elif path == "/api/accounts":
+            self.send_json({"accounts": fetch_all(self.conn, "SELECT * FROM accounts ORDER BY institution, display_name")})
+        elif path == "/api/transactions":
+            self.send_json({"transactions": self.list_transactions(query)})
+        elif path == "/api/review-items":
+            self.send_json({"review_items": self.list_review_items()})
+        elif path == "/api/dashboard/fire":
+            fire_multiple = float((query.get("multiple") or ["25"])[0])
+            self.send_json(fire_snapshot(self.conn, fire_multiple))
+        elif path == "/api/dashboard/monthly-flow":
+            recompute_monthly_snapshots(self.conn)
+            self.send_json({"months": fetch_all(self.conn, "SELECT * FROM monthly_snapshots ORDER BY month")})
+        elif path == "/api/dashboard/spending":
+            self.send_json(spending_breakdown(self.conn))
+        elif path == "/api/data-health":
+            self.send_json(fire_snapshot(self.conn)["data_health"])
+        elif path == "/api/rules":
+            self.send_json({"rules": fetch_all(self.conn, "SELECT * FROM classification_rules ORDER BY priority, id")})
+        else:
+            self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def handle_import(self) -> None:
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type"),
+                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            },
+        )
+        file_item = form["file"] if "file" in form else None
+        if isinstance(file_item, list):
+            file_item = file_item[0] if file_item else None
+        if file_item is None or not getattr(file_item, "file", None):
+            self.send_json({"error": "Missing file field"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        filename = Path(file_item.filename or "upload.csv").name
+        content = file_item.file.read()
+        institution = form.getfirst("institution") or None
+        account_role = form.getfirst("account_role") or None
+        account_hint = form.getfirst("account_hint") or ""
+        result = import_csv(self.conn, filename, content, institution, account_role, account_hint)
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json(result)
+
+    def handle_account_patch(self, account_id: int) -> None:
+        body = self.read_json()
+        allowed_roles = {"checking", "savings", "investment", "mortgage", "credit_card_proxy", "unknown"}
+        role = body.get("role")
+        display_name = body.get("display_name")
+        if role and role not in allowed_roles:
+            self.send_json({"error": f"Invalid role: {role}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if role:
+            self.conn.execute("UPDATE accounts SET role = ? WHERE id = ?", (role, account_id))
+        if display_name:
+            self.conn.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (display_name, account_id))
+        self.conn.commit()
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"account": fetch_one(self.conn, "SELECT * FROM accounts WHERE id = ?", (account_id,))})
+
+    def handle_review_resolve(self, review_id: int) -> None:
+        body = self.read_json()
+        tx_id = int(body.get("transaction_id") or 0)
+        if not tx_id:
+            row = self.conn.execute("SELECT transaction_id FROM review_items WHERE id = ?", (review_id,)).fetchone()
+            if not row:
+                self.send_json({"error": "Review item not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            tx_id = int(row["transaction_id"])
+        economic_class = body.get("economic_class", "household_spend")
+        category = body.get("category", "Uncategorized")
+        subcategory = body.get("subcategory", "")
+        create_rule = bool(body.get("create_rule", True))
+        rule_id = None
+        if create_rule:
+            rule_id = create_rule_from_review(self.conn, tx_id, economic_class, category, subcategory)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO transaction_annotations (
+                transaction_id, economic_class, category, subcategory, confidence, rule_id,
+                review_status, explanation, updated_at
+            ) VALUES (?, ?, ?, ?, 0.99, ?, 'reviewed', 'User review decision', CURRENT_TIMESTAMP)
+            """,
+            (tx_id, economic_class, category, subcategory, rule_id),
+        )
+        self.conn.execute(
+            "UPDATE review_items SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (review_id,),
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"resolved": True, "rule_id": rule_id})
+
+    def handle_create_rule(self) -> None:
+        body = self.read_json()
+        name = body.get("name") or "Custom rule"
+        conditions = body.get("conditions") or {}
+        actions = body.get("actions") or {}
+        confidence = float(body.get("confidence", 0.95))
+        cursor = self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (?, ?, ?, ?, ?, 'user', 1)
+            """,
+            (
+                name,
+                int(body.get("priority", 50)),
+                json_dumps(conditions),
+                json_dumps(actions),
+                confidence,
+            ),
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"rule_id": cursor.lastrowid})
+
+    def handle_rule_patch(self, rule_id: int) -> None:
+        body = self.read_json()
+        updates = []
+        params = []
+        for column in ("name", "priority", "confidence", "enabled"):
+            if column in body:
+                updates.append(f"{column} = ?")
+                params.append(body[column])
+        if "conditions" in body:
+            updates.append("conditions_json = ?")
+            params.append(json_dumps(body["conditions"]))
+        if "actions" in body:
+            updates.append("actions_json = ?")
+            params.append(json_dumps(body["actions"]))
+        if not updates:
+            self.send_json({"error": "No rule updates supplied"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        params.append(rule_id)
+        self.conn.execute(f"UPDATE classification_rules SET {', '.join(updates)} WHERE id = ?", params)
+        self.conn.commit()
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"rule": fetch_one(self.conn, "SELECT * FROM classification_rules WHERE id = ?", (rule_id,))})
+
+    def handle_reclassify(self) -> None:
+        counts = classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"classified": counts})
+
+    def list_transactions(self, query: Dict[str, Any]) -> Any:
+        clauses = ["1 = 1"]
+        params = []
+        if "month" in query:
+            clauses.append("substr(nt.transaction_date, 1, 7) = ?")
+            params.append(query["month"][0])
+        if "economic_class" in query:
+            clauses.append("ta.economic_class = ?")
+            params.append(query["economic_class"][0])
+        if "category" in query:
+            clauses.append("ta.category = ?")
+            params.append(query["category"][0])
+        if "q" in query:
+            clauses.append("(nt.description LIKE ? OR nt.normalized_merchant LIKE ? OR nt.counterparty_name LIKE ?)")
+            like = f"%{query['q'][0]}%"
+            params.extend([like, like, like])
+        limit = int((query.get("limit") or ["250"])[0])
+        params.append(limit)
+        return fetch_all(
+            self.conn,
+            f"""
+            SELECT
+                nt.id, nt.transaction_date, nt.amount, nt.currency, nt.counterparty_name,
+                nt.description, nt.normalized_merchant, nt.is_duplicate,
+                a.display_name AS account_name, a.role AS account_role, a.institution,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.explanation
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            LEFT JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY nt.transaction_date DESC, nt.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+
+    def list_review_items(self) -> Any:
+        rows = fetch_all(
+            self.conn,
+            """
+            SELECT
+                ri.*,
+                nt.transaction_date, nt.amount, nt.description, nt.normalized_merchant,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence
+            FROM review_items ri
+            LEFT JOIN normalized_transactions nt ON nt.id = ri.transaction_id
+            LEFT JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE ri.status = 'open'
+            ORDER BY ri.materiality DESC, ri.id
+            """,
+        )
+        for row in rows:
+            row["suggested_action"] = json_loads(row.pop("suggested_action_json"), {})
+        return rows
+
+    def serve_static(self, path: str) -> None:
+        if path in {"", "/"}:
+            path = "/index.html"
+        safe_path = Path(path.lstrip("/"))
+        if ".." in safe_path.parts:
+            self.send_error(HTTPStatus.BAD_REQUEST)
+            return
+        file_path = WEB_ROOT / safe_path
+        if not file_path.exists() or not file_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        content = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def read_json(self) -> Dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length == 0:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        content = json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+
+def main() -> None:
+    host = os.environ.get("HOUSEHOLD_FIRE_LENS_HOST", "127.0.0.1")
+    port = int(os.environ.get("HOUSEHOLD_FIRE_LENS_PORT", "8765"))
+    server = HTTPServer((host, port), HouseholdFireLensHandler)
+    print(f"Household FIRE Lens running at http://{host}:{port}")
+    print(f"Database: {get_database_path()}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down")
+    finally:
+        if hasattr(server, "conn"):
+            server.conn.close()  # type: ignore[attr-defined]
+
+
+if __name__ == "__main__":
+    main()

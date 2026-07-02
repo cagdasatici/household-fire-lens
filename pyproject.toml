@@ -1,0 +1,15 @@
+[project]
+name = "household-fire-lens"
+version = "0.1.0"
+description = "Local-first household economics dashboard for FIRE planning"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Household FIRE Lens contributors" }]
+dependencies = []
+
+[project.scripts]
+household-fire-lens = "household_fire_lens.server:main"
+
+[tool.setuptools]
+packages = ["household_fire_lens"]

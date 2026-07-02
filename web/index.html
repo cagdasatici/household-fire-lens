@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Household FIRE Lens</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">FL</div>
+        <div>
+          <h1>Household FIRE Lens</h1>
+          <p>Local household economics</p>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="fire">FIRE Snapshot</button>
+        <button class="nav-item" data-view="flow">Monthly Flow</button>
+        <button class="nav-item" data-view="spending">Spending</button>
+        <button class="nav-item" data-view="review">Review</button>
+        <button class="nav-item" data-view="health">Data Health</button>
+        <button class="nav-item" data-view="imports">Imports</button>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h2 id="view-title">FIRE Snapshot</h2>
+          <p id="view-subtitle">Normalized burn, savings rate, investment rate, and FI number.</p>
+        </div>
+        <div class="toolbar">
+          <label class="compact-field">
+            <span>FIRE multiple</span>
+            <input id="fire-multiple" type="number" value="25" min="15" max="60" step="1" />
+          </label>
+          <button id="refresh-button">Refresh</button>
+        </div>
+      </header>
+
+      <section id="fire" class="view active">
+        <div class="metric-grid">
+          <article class="metric">
+            <span>Monthly FIRE burn</span>
+            <strong id="monthly-burn">€0</strong>
+          </article>
+          <article class="metric">
+            <span>Annualized burn</span>
+            <strong id="annual-burn">€0</strong>
+          </article>
+          <article class="metric">
+            <span>FIRE savings rate</span>
+            <strong id="savings-rate">n/a</strong>
+          </article>
+          <article class="metric">
+            <span>FI number</span>
+            <strong id="fi-number">€0</strong>
+          </article>
+          <article class="metric">
+            <span>Wealth allocation</span>
+            <strong id="wealth-allocation">€0</strong>
+          </article>
+          <article class="metric">
+            <span>Investment rate</span>
+            <strong id="investment-rate">n/a</strong>
+          </article>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Monthly Burn</h3>
+            <span>Cashflow and normalized FIRE view</span>
+          </div>
+          <div id="burn-chart" class="bar-chart"></div>
+        </div>
+      </section>
+
+      <section id="flow" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Monthly Flow</h3>
+            <span>Income, burn, mortgage, investments, reimbursements, and net cash movement.</span>
+          </div>
+          <div class="table-wrap">
+            <table id="flow-table"></table>
+          </div>
+        </div>
+      </section>
+
+      <section id="spending" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Spending Breakdown</h3>
+            <span>Economic class and category totals.</span>
+          </div>
+          <div class="table-wrap">
+            <table id="spending-table"></table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Recent Transactions</h3>
+            <span>Drill into the numbers behind the dashboard.</span>
+          </div>
+          <div class="filters">
+            <input id="transaction-search" type="search" placeholder="Filter transactions" />
+            <button id="transaction-search-button">Search</button>
+          </div>
+          <div class="table-wrap">
+            <table id="transactions-table"></table>
+          </div>
+        </div>
+      </section>
+
+      <section id="review" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Review Queue</h3>
+            <span>Only material uncertainty should appear here.</span>
+          </div>
+          <div id="review-list" class="review-list"></div>
+        </div>
+      </section>
+
+      <section id="health" class="view">
+        <div class="metric-grid">
+          <article class="metric">
+            <span>Transactions</span>
+            <strong id="health-transactions">0</strong>
+          </article>
+          <article class="metric">
+            <span>Open review items</span>
+            <strong id="health-review">0</strong>
+          </article>
+          <article class="metric">
+            <span>Duplicate rows</span>
+            <strong id="health-duplicates">0</strong>
+          </article>
+          <article class="metric">
+            <span>Needs-review amount</span>
+            <strong id="health-unknown">€0</strong>
+          </article>
+        </div>
+      </section>
+
+      <section id="imports" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Import CSV</h3>
+            <span>Choose an institution and account role once; rules handle the rest.</span>
+          </div>
+          <form id="import-form" class="import-form">
+            <input name="file" type="file" accept=".csv,.tsv,text/csv" required />
+            <select name="institution">
+              <option value="">Auto-detect institution</option>
+              <option value="ing">ING</option>
+              <option value="abn">ABN AMRO</option>
+              <option value="ibkr">IBKR</option>
+              <option value="degiro">DeGiro</option>
+              <option value="generic">Generic</option>
+            </select>
+            <select name="account_role">
+              <option value="">Auto/default role</option>
+              <option value="checking">Checking</option>
+              <option value="savings">Savings</option>
+              <option value="investment">Investment</option>
+              <option value="mortgage">Mortgage</option>
+              <option value="unknown">Unknown</option>
+            </select>
+            <input name="account_hint" placeholder="Account label, optional" />
+            <button type="submit">Import</button>
+          </form>
+          <pre id="import-result"></pre>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Accounts</h3>
+            <span>Roles drive transfer, investment, and mortgage treatment.</span>
+          </div>
+          <div class="table-wrap">
+            <table id="accounts-table"></table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Imported Files</h3>
+            <span>Raw file hashes prevent duplicate imports.</span>
+          </div>
+          <div class="table-wrap">
+            <table id="imports-table"></table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
