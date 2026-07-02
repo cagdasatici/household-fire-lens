@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -11,9 +12,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from .database import json_dumps, json_loads
 
 
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 WIKIDATA_SEARCH_URL = "https://www.wikidata.org/w/api.php"
 USER_AGENT = "HouseholdFIRELens/0.1 (local personal finance entity classification)"
 LOOKUP_TIMEOUT_SECONDS = 5
+NOMINATIM_DELAY_SECONDS = 1.1
 
 GENERIC_LOOKUP_NAMES = {
     "",
@@ -41,6 +44,19 @@ CATEGORY_SIGNALS: List[Tuple[Tuple[str, ...], str, str, str, float]] = [
     (("energy company", "electric utility", "telecommunications", "internet service provider", "water company"), "household_spend", "Housing", "Utilities", 0.70),
     (("insurance company", "insurer"), "household_spend", "Housing", "Insurance", 0.70),
     (("tax authority", "municipality", "government agency", "public body"), "household_spend", "Taxes and Government", "", 0.70),
+]
+
+OSM_TAG_RULES: List[Tuple[Tuple[str, ...], Tuple[str, ...], str, str, str, float]] = [
+    (("amenity", "healthcare"), ("dentist", "clinic", "doctors", "hospital", "pharmacy", "physiotherapist", "orthodontist"), "household_spend", "Health", "", 0.86),
+    (("amenity",), ("restaurant", "cafe", "bar", "pub", "fast_food", "ice_cream", "food_court"), "household_spend", "Eating Out", "", 0.84),
+    (("shop",), ("supermarket", "convenience", "greengrocer", "bakery", "butcher", "deli", "cheese", "seafood"), "household_spend", "Groceries", "", 0.84),
+    (("tourism", "aeroway"), ("hotel", "hostel", "apartment", "guest_house", "camp_site", "travel_agency", "terminal"), "household_spend", "Holiday", "", 0.84),
+    (("amenity", "railway", "public_transport"), ("fuel", "parking", "taxi", "bicycle_rental", "station", "tram_stop", "bus_station", "platform"), "household_spend", "Transportation", "", 0.80),
+    (("shop",), ("clothes", "shoes", "department_store", "furniture", "electronics", "doityourself", "hardware", "books", "gift", "sports", "mall"), "household_spend", "Shopping", "", 0.80),
+    (("office", "amenity"), ("insurance", "bank", "financial_advice"), "household_spend", "Banking and Fees", "", 0.70),
+    (("office", "amenity"), ("government", "townhall", "courthouse", "post_office"), "household_spend", "Taxes and Government", "", 0.74),
+    (("craft",), ("*",), "household_spend", "Other", "Local Service", 0.68),
+    (("shop", "amenity"), ("*",), "household_spend", "Other", "Local Merchant", 0.62),
 ]
 
 
@@ -130,7 +146,72 @@ def classify_from_public_entity(search_results: Iterable[Dict[str, Any]]) -> Opt
     return None
 
 
-def wikidata_search(merchant_name: str, fetch_json: Optional[Callable[[str], Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+def classify_from_osm_place(search_results: Iterable[Dict[str, Any]]) -> Optional[EntityHint]:
+    for result in search_results:
+        tag_pairs = osm_tag_pairs(result)
+        for tag_key, tag_value in tag_pairs:
+            for key_signals, value_signals, economic_class, category, subcategory, confidence in OSM_TAG_RULES:
+                if tag_key not in key_signals:
+                    continue
+                if "*" not in value_signals and tag_value not in value_signals:
+                    continue
+                osm_type = str(result.get("osm_type") or "").strip()
+                osm_id = str(result.get("osm_id") or "").strip()
+                source_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}" if osm_type and osm_id else "https://www.openstreetmap.org/"
+                label = str(result.get("name") or result.get("display_name") or "")
+                description = f"OSM {tag_key}={tag_value}"
+                return EntityHint(
+                    economic_class=economic_class,
+                    category=category,
+                    subcategory=subcategory,
+                    confidence=confidence,
+                    label=label,
+                    description=description,
+                    source="openstreetmap_nominatim",
+                    source_url=source_url,
+                    raw=result,
+                )
+    return None
+
+
+def osm_tag_pairs(result: Dict[str, Any]) -> List[Tuple[str, str]]:
+    pairs = []
+    for key in ("category", "class", "addresstype"):
+        value = str(result.get(key) or "").lower()
+        type_value = str(result.get("type") or "").lower()
+        if value and type_value:
+            pairs.append((value, type_value))
+    for container_name in ("extratags", "address", "namedetails"):
+        container = result.get(container_name) or {}
+        if not isinstance(container, dict):
+            continue
+        for key, value in container.items():
+            if not isinstance(value, str):
+                continue
+            pairs.append((str(key).lower(), value.lower()))
+    return pairs
+
+
+def nominatim_search(merchant_name: str, fetch_json: Optional[Callable[[str], Any]] = None) -> List[Dict[str, Any]]:
+    params = urllib.parse.urlencode(
+        {
+            "q": f"{lookup_key(merchant_name)}, Netherlands",
+            "format": "jsonv2",
+            "limit": "5",
+            "countrycodes": "nl",
+            "layer": "poi",
+            "addressdetails": "1",
+            "extratags": "1",
+            "namedetails": "1",
+            "accept-language": "nl,en",
+        }
+    )
+    url = f"{NOMINATIM_SEARCH_URL}?{params}"
+    payload = fetch_json(url) if fetch_json else fetch_url_json(url)
+    return payload if isinstance(payload, list) else []
+
+
+def wikidata_search(merchant_name: str, fetch_json: Optional[Callable[[str], Any]] = None) -> List[Dict[str, Any]]:
     search = lookup_key(merchant_name)
     results: List[Dict[str, Any]] = []
     seen = set()
@@ -166,7 +247,7 @@ def fetch_url_json(url: str) -> Dict[str, Any]:
 def resolve_merchant(
     conn: sqlite3.Connection,
     merchant_name: str,
-    fetch_json: Optional[Callable[[str], Dict[str, Any]]] = None,
+    fetch_json: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
     key = lookup_key(merchant_name)
     existing = conn.execute(
@@ -178,14 +259,23 @@ def resolve_merchant(
     if not is_lookup_safe(merchant_name):
         store_entity_result(conn, key, merchant_name, "skipped", None, None)
         return {"status": "skipped", "lookup_key": key}
+    raw: Dict[str, Any] = {}
     try:
-        results = wikidata_search(merchant_name, fetch_json=fetch_json)
+        osm_results = nominatim_search(merchant_name, fetch_json=fetch_json)
+        raw["openstreetmap_nominatim"] = osm_results
+        hint = classify_from_osm_place(osm_results)
     except Exception as exc:  # pragma: no cover - network boundary
-        store_entity_result(conn, key, merchant_name, "error", None, {"error": str(exc)})
-        return {"status": "error", "lookup_key": key, "error": str(exc)}
-    hint = classify_from_public_entity(results)
+        raw["openstreetmap_nominatim_error"] = str(exc)
+        hint = None
+    if not hint:
+        try:
+            wikidata_results = wikidata_search(merchant_name, fetch_json=fetch_json)
+            raw["wikidata"] = wikidata_results
+            hint = classify_from_public_entity(wikidata_results)
+        except Exception as exc:  # pragma: no cover - network boundary
+            raw["wikidata_error"] = str(exc)
     if hint:
-        store_entity_result(conn, key, merchant_name, "resolved", hint, {"search": results})
+        store_entity_result(conn, key, merchant_name, "resolved", hint, raw)
         return {
             "status": "resolved",
             "lookup_key": key,
@@ -194,7 +284,10 @@ def resolve_merchant(
             "confidence": hint.confidence,
             "source": hint.source,
         }
-    store_entity_result(conn, key, merchant_name, "unresolved", None, {"search": results})
+    if "openstreetmap_nominatim_error" in raw and "wikidata_error" in raw:
+        store_entity_result(conn, key, merchant_name, "error", None, raw)
+        return {"status": "error", "lookup_key": key, "error": "; ".join(str(value) for value in raw.values())}
+    store_entity_result(conn, key, merchant_name, "unresolved", None, raw)
     return {"status": "unresolved", "lookup_key": key}
 
 
@@ -216,7 +309,7 @@ def store_entity_result(
         (
             key,
             merchant_name,
-            hint.source if hint else "wikidata",
+            hint.source if hint else "provider_chain",
             hint.source_url if hint else "",
             hint.label if hint else "",
             hint.description if hint else "",
@@ -254,10 +347,12 @@ def candidate_merchants_for_enrichment(conn: sqlite3.Connection, limit: int = 50
     return [row["normalized_merchant"] for row in rows if is_lookup_safe(row["normalized_merchant"])]
 
 
-def enrich_candidate_merchants(conn: sqlite3.Connection, limit: int = 50) -> Dict[str, Any]:
+def enrich_candidate_merchants(conn: sqlite3.Connection, limit: int = 10) -> Dict[str, Any]:
     merchants = candidate_merchants_for_enrichment(conn, limit)
     summary = {"candidates": len(merchants), "resolved": 0, "cached": 0, "unresolved": 0, "skipped": 0, "error": 0}
-    for merchant in merchants:
+    for index, merchant in enumerate(merchants):
+        if index > 0:
+            time.sleep(NOMINATIM_DELAY_SECONDS)
         result = resolve_merchant(conn, merchant)
         status = result["status"]
         summary[status] = summary.get(status, 0) + 1

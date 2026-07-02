@@ -263,6 +263,27 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["category"], "Health")
         self.assertIn("Free public entity lookup", row["explanation"])
 
+    def test_openstreetmap_entity_cache_is_preferred_for_local_places(self):
+        def fake_fetch(url):
+            if "nominatim.openstreetmap.org" in url:
+                return [
+                    {
+                        "osm_type": "node",
+                        "osm_id": 123,
+                        "name": "Van Dulken",
+                        "display_name": "Van Dulken, Amsterdam, Nederland",
+                        "category": "healthcare",
+                        "type": "dentist",
+                        "extratags": {"healthcare": "dentist"},
+                    }
+                ]
+            return {"search": []}
+
+        result = resolve_merchant(self.conn, "Van Dulken", fetch_json=fake_fetch)
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["category"], "Health")
+        self.assertEqual(result["source"], "openstreetmap_nominatim")
+
     def test_svb_child_benefit_is_income_not_review(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-04-02,Main,SEPA OVERBOEKING IBAN BIC RABONL2U NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER,Sociale Verzekeringsbank,286.45,EUR

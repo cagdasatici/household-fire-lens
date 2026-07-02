@@ -290,7 +290,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
 
     def handle_entity_enrichment(self) -> None:
         body = self.read_json()
-        limit = max(1, min(int(body.get("limit", 50)), 100))
+        limit = max(1, min(int(body.get("limit", 10)), 25))
         summary = enrich_candidate_merchants(self.conn, limit=limit)
         counts = classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)

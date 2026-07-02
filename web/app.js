@@ -422,7 +422,7 @@ async function runEntityEnrichment() {
     const data = await api("/api/entity-enrichment/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ limit: 50 }),
+      body: JSON.stringify({ limit: 10 }),
     });
     const summary = data.enrichment || {};
     result.textContent = `${summary.resolved || 0} resolved · ${summary.unresolved || 0} unresolved · ${summary.error || 0} errors`;
