@@ -28,12 +28,13 @@ MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
     (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK"), "Groceries", ""),
     (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA"), "Eating Out", ""),
     (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE"), "Holiday", ""),
-    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT"), "Transportation", ""),
+    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE"), "Transportation", ""),
     (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION"), "Subscriptions", ""),
     (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO"), "Housing", "Utilities"),
     (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN "), "Housing", "Insurance"),
-    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS"), "Health", ""),
-    (("AMAZON", "BOL.COM", "IKEA", "H&M", "ZARA", "COOLBLUE", "MEDIA MARKT"), "Shopping", ""),
+    (("MEUBEL", "HENDERS EN HAZEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT"), "Home and Furniture", ""),
+    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN"), "Health", ""),
+    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB"), "Shopping", ""),
     (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP"), "Taxes and Government", ""),
     (("BANK", "FEE", "KOSTEN", "RENTE"), "Banking and Fees", ""),
 ]
@@ -43,15 +44,19 @@ INVESTMENT_KEYWORDS = ("IBKR", "INTERACTIVE BROKERS", "DEGIRO", "DE GIRO", "BROK
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
-REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA")
+REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
+REIMBURSEMENT_KEYWORDS = ("REIMBURSEMENT", "VERGOEDING", "EXPENSE REIMBURSEMENT")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
 SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
 CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
 CASH_WITHDRAWAL_KEYWORDS = ("GELDMAAT", "ATM", "CASH WITHDRAWAL", "CONTANTOPNAME", "GELDAUTOMAAT")
-CARD_TERMINAL_PROCESSOR_KEYWORDS = ("ZETTLE", "SUMUP", "PAY.NL", "STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE")
+CARD_TERMINAL_PROCESSOR_KEYWORDS = ("ZETTLE", "SUMUP", "PAY.NL", "STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE", "RIVERTY")
+PAYMENT_REQUEST_KEYWORDS = ("TIKKIE", "BETAALVERZOEK", "PAYMENT REQUEST", "BETAALVERZOEKJE")
+BANK_TRANSFER_KEYWORDS = ("SEPA OVERBOEKING", "SEPA", "OVERBOEKING", "OVERSCHRIJVING", "BANK TRANSFER")
 RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 MAX_OPEN_REVIEW_GROUPS = 150
+UNKNOWN_OUTFLOW_REVIEW_THRESHOLD = 250.0
 
 
 @dataclass
@@ -206,8 +211,10 @@ def classify_transaction(
         return Annotation("reimbursement_pass_through", "Reimbursements", "Booking.com", 0.93, "Booking.com reimbursement deposit")
 
     if tx["id"] in refund_category_by_id or (amount > 0 and any(keyword in text for keyword in REFUND_KEYWORDS)):
-        category, subcategory = refund_category_by_id.get(tx["id"], ("Uncategorized", ""))
-        return Annotation("refund", category, subcategory, 0.84, "Refund reduces original category when matched")
+        category, subcategory = refund_category_by_id.get(tx["id"], ("", ""))
+        if not category:
+            category, subcategory, _, _ = categorize_merchant(text)
+        return Annotation("refund", category or "Uncategorized", subcategory, 0.84, "Refund reduces original category when matched")
 
     if tx["id"] in transfer_set:
         if role == "investment" or any(keyword in text for keyword in INVESTMENT_KEYWORDS):
@@ -232,6 +239,25 @@ def classify_transaction(
     if any(keyword in text for keyword in SAVINGS_KEYWORDS):
         return Annotation("internal_transfer", "Inter-account Transfers", "Savings", 0.74, "Savings or own-account keyword")
 
+    if any(keyword in text for keyword in PAYMENT_REQUEST_KEYWORDS):
+        if amount > 0:
+            return Annotation(
+                "reimbursement_pass_through",
+                "Reimbursements",
+                "Payment Request",
+                0.72,
+                "Payment request settlement received",
+            )
+        return Annotation("household_spend", "Other", "Payment Request", 0.64, "Payment request paid")
+
+    if amount > 0 and any(keyword in text for keyword in REIMBURSEMENT_KEYWORDS):
+        return Annotation("reimbursement_pass_through", "Reimbursements", "Other", 0.72, "Reimbursement-like deposit")
+
+    if amount > 0:
+        category, subcategory, _, _ = categorize_merchant(text)
+        if category:
+            return Annotation("refund", category, subcategory, 0.7, "Positive merchant credit treated as refund")
+
     if amount > 0:
         return Annotation("needs_review", "Uncategorized", "", 0.45, "Positive transaction is not salary or reimbursement")
 
@@ -252,9 +278,12 @@ def classify_transaction(
     if amount < 0 and any(keyword in text for keyword in CARD_TERMINAL_PROCESSOR_KEYWORDS):
         return Annotation("household_spend", "Other", "Payment Processor", 0.62, "Payment processor transaction with extracted merchant")
 
-    if abs(amount) >= 50:
+    if amount < 0 and any(keyword in text for keyword in BANK_TRANSFER_KEYWORDS):
+        return Annotation("household_spend", "Other", "Bank Transfer", 0.6, "Unmatched outbound bank transfer")
+
+    if abs(amount) >= UNKNOWN_OUTFLOW_REVIEW_THRESHOLD:
         return Annotation("needs_review", "Uncategorized", "", 0.4, "Material outflow needs classification")
-    return Annotation("household_spend", "Other", "", 0.46, "Low-value uncategorized spend")
+    return Annotation("household_spend", "Other", "", 0.58, "Uncategorized outflow below review threshold")
 
 
 def tx_text(tx: Dict) -> str:

@@ -232,6 +232,132 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["category"], "Inter-account Transfers")
         self.assertEqual(row["subcategory"], "Savings")
 
+    def test_sepa_names_payment_requests_and_bank_transfers_are_not_review(self):
+        self.assertEqual(
+            normalize_merchant("SEPA OVERBOEKING IBAN BIC RABONL2U NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER"),
+            "SOCIALE VERZEKERINGSBANK",
+        )
+        self.assertEqual(
+            normalize_merchant("KLM N.V. Transfer Name: KLM N.V. Description: Refund IBAN: NL19INGB0000787900"),
+            "KLM N.V.",
+        )
+        self.assertEqual(
+            normalize_merchant("/TRTP/SEPA OVERBOEKING/IBAN/NL86INGB0002445588/BIC/INGBNL2A/NAME/BELASTINGDIENST/REMI/TERUGGAAF"),
+            "BELASTINGDIENST",
+        )
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-06-01,Main,Tikkie betaald aan friend,, -42.50,EUR
+2026-06-02,Main,Tikkie ontvangen van friend,,42.50,EUR
+2026-06-03,Main,SEPA OVERBOEKING IBAN BIC RABONL2U NAAM RANDOM PERSON OMSCHRIJVING dinner,, -85.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-payment-request-transfer.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = [
+            dict(row)
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                ORDER BY nt.transaction_date
+                """
+            ).fetchall()
+        ]
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(rows[0]["economic_class"], "household_spend")
+        self.assertEqual(rows[0]["category"], "Other")
+        self.assertEqual(rows[0]["subcategory"], "Payment Request")
+        self.assertEqual(rows[1]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows[1]["category"], "Reimbursements")
+        self.assertEqual(rows[1]["subcategory"], "Payment Request")
+        self.assertEqual(rows[2]["economic_class"], "household_spend")
+        self.assertEqual(rows[2]["category"], "Other")
+        self.assertEqual(rows[2]["subcategory"], "Bank Transfer")
+        self.assertEqual(review_count, 0)
+
+    def test_uncategorized_outflows_review_only_when_material(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-06-01,Main,Small mystery merchant,Small Mystery,-85.00,EUR
+2026-06-02,Main,Large mystery merchant,Large Mystery,-275.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-unknown-threshold.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.normalized_merchant, ta.economic_class, ta.category, ta.confidence
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(rows["SMALL MYSTERY"]["economic_class"], "household_spend")
+        self.assertEqual(rows["SMALL MYSTERY"]["category"], "Other")
+        self.assertGreaterEqual(rows["SMALL MYSTERY"]["confidence"], 0.55)
+        self.assertEqual(rows["LARGE MYSTERY"]["economic_class"], "needs_review")
+        self.assertEqual(review_count, 1)
+
+    def test_refunds_reimbursements_and_common_large_merchants_avoid_review(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-06-01,Main,ALBERT HEIJN AMSTELVEEN Cashback transaction,Albert Heijn,12.50,EUR
+2026-06-02,Main,BELASTINGDIENST TERUGGAAF IB/PVV,Belastingdienst,889.00,EUR
+2026-06-03,Main,Stichting example Vergoeding april,Stichting Example,100.00,EUR
+2026-06-04,Main,Dierenartspraktijk West payment terminal,Dierenartspraktijk West,-1415.45,EUR
+2026-06-05,Main,KWIKFIT CENTER AMSTELVEEN payment terminal,Kwikfit,-492.50,EUR
+2026-06-06,Main,BCK Henders en Hazel Cruquius payment terminal,Henders en Hazel,-316.00,EUR
+2026-06-07,Main,Riverty GmbH iDEAL,Riverty GmbH,-1150.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-common-household-patterns.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.normalized_merchant, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(rows["ALBERT HEIJN"]["economic_class"], "refund")
+        self.assertEqual(rows["ALBERT HEIJN"]["category"], "Groceries")
+        self.assertEqual(rows["BELASTINGDIENST"]["economic_class"], "refund")
+        self.assertEqual(rows["BELASTINGDIENST"]["category"], "Taxes and Government")
+        self.assertEqual(rows["STICHTING EXAMPLE"]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows["DIERENARTSPRAKTIJK WEST"]["category"], "Health")
+        self.assertEqual(rows["KWIKFIT"]["category"], "Transportation")
+        self.assertEqual(rows["HENDERS EN HAZEL"]["category"], "Home and Furniture")
+        self.assertEqual(rows["RIVERTY GMBH"]["category"], "Other")
+        self.assertEqual(rows["RIVERTY GMBH"]["subcategory"], "Payment Processor")
+        self.assertEqual(review_count, 0)
+
     def test_mollie_payment_processor_keeps_embedded_merchant(self):
         self.assertEqual(
             normalize_merchant("Van Dulken via Stichting Mollie Payments"),

@@ -19,6 +19,11 @@ PAYMENT_PROCESSOR_PATTERNS = (
     re.compile(r"^SUMUP\s+(?P<merchant>.+)$"),
     re.compile(r"^PAY\.NL\s+(?P<merchant>.+)$"),
 )
+TRANSFER_NAME_PATTERN = re.compile(
+    r"(?:^|[\s/])(?:NAAM|NAME|INCASSANT)\s*[:/]?\s*"
+    r"(?P<merchant>.+?)"
+    r"(?=(?:\s+|/)(?:OMSCHRIJVING|DESCRIPTION|REMI|IBAN|BIC|REFERENCE|EREF|DATE|VALUE|MACHTIGING|KENMERK)\b|$)"
+)
 IBAN_LENGTHS = {
     "AD": 24,
     "AE": 23,
@@ -135,6 +140,9 @@ def normalize_header(value: str) -> str:
 
 def normalize_merchant(value: str) -> str:
     text = (value or "").upper()
+    transfer_name = TRANSFER_NAME_PATTERN.search(text)
+    if transfer_name:
+        text = transfer_name.group("merchant")
     for pattern in PAYMENT_PROCESSOR_PATTERNS:
         match = pattern.search(text)
         if match:
@@ -146,7 +154,11 @@ def normalize_merchant(value: str) -> str:
     text = re.sub(r"\b(NLD|NL|NETHERLANDS|NEDERLAND)\b$", " ", text.strip())
     text = re.sub(r"\bNL\d{2}[A-Z0-9]{4}\d{10}\b", " ", text)
     text = re.sub(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", " ", text)
-    text = re.sub(r"\b(BETAALAUTOMAAT|PASVOLGNR|TRANSACTIE|TRANSACTION|KENMERK|MACHTIGING|INCASSO|TERMINAL)\b", " ", text)
+    text = re.sub(
+        r"\b(SEPA|OVERBOEKING|OVERSCHRIJVING|IBAN|BIC|NAAM|OMSCHRIJVING|BETAALAUTOMAAT|PASVOLGNR|TRANSACTIE|TRANSACTION|KENMERK|MACHTIGING|INCASSO|TERMINAL)\b",
+        " ",
+        text,
+    )
     text = re.sub(r"\b\d{4,}\b", " ", text)
     text = re.sub(r"[^A-Z0-9&.+ ]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
