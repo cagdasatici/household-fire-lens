@@ -6,6 +6,7 @@ from household_fire_lens.aggregation import fire_snapshot, optimization_insights
 from household_fire_lens.classifier import classify_all
 from household_fire_lens.database import connect_database
 from household_fire_lens.importer import import_csv
+from household_fire_lens.parsers import parse_transactions
 
 
 ING_CSV = """Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag (EUR);MutatieSoort;Mededelingen
@@ -23,6 +24,18 @@ ING_CSV = """Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag
 ABN_CSV = """Boekdatum;Omschrijving;Rekeningnummer;Tegenrekeningnummer;Naam tegenpartij;Bedrag;Valuta
 2026-01-02;Hypotheek maandbetaling;NL02ABNA0000000002;NL44MORT0000000001;ABN AMRO Hypotheek;-1500,00;EUR
 2026-01-20;Vattenfall Energie;NL02ABNA0000000002;NL55UTIL0000000001;Vattenfall;-180,00;EUR
+"""
+
+
+ABN_HEADERLESS_TAB = (
+    "123456789\tEUR\t20250103\t658,78\t804,23\t20250103\t145,45\tSEPA refund text\r\n"
+    "123456789\tEUR\t20250104\t804,23\t791,89\t20250104\t-12,34\tSEPA card payment text\r\n"
+)
+
+
+ING_AMOUNT_EUR_CSV = """Date,Name / Description,Account,Counterparty,Code,Debit/credit,Amount (EUR),Transaction type,Notifications,Resulting balance,Tag
+2026-07-01,Example Salary,NL00INGB0000000000,NL00BANK0000000000,GT,Credit,"5000,00",Transfer,Salary text,"10000,00",
+2026-07-02,Example Shop,NL00INGB0000000000,NL00SHOP0000000000,BA,Debit,"12,34",Card,Shop text,"9987,66",
 """
 
 
@@ -138,6 +151,31 @@ class DomainTests(unittest.TestCase):
         categories = {item["category"] for item in insights["opportunities"]}
         self.assertIn("Unknown Card Spend", categories)
         self.assertGreaterEqual(insights["summary"]["months_loaded"], 3)
+
+    def test_headerless_abn_tab_export_parses(self):
+        institution, parsed = parse_transactions(
+            "TXT260702214417.TAB",
+            ABN_HEADERLESS_TAB.encode("utf-8"),
+            institution="abn",
+        )
+        self.assertEqual(institution, "abn")
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].transaction_date, "2025-01-03")
+        self.assertEqual(parsed[0].amount, 145.45)
+        self.assertEqual(parsed[1].amount, -12.34)
+        self.assertEqual(parsed[0].currency, "EUR")
+
+    def test_ing_amount_eur_export_parses(self):
+        institution, parsed = parse_transactions(
+            "NL00INGB0000000000_01-07-2025_01-07-2026.csv",
+            ING_AMOUNT_EUR_CSV.encode("utf-8"),
+            institution="ing",
+        )
+        self.assertEqual(institution, "ing")
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].amount, 5000.0)
+        self.assertEqual(parsed[1].amount, -12.34)
+        self.assertIn("Salary text", parsed[0].description)
 
 
 if __name__ == "__main__":

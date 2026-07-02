@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-PARSER_VERSION = "2026.07.02.1"
+PARSER_VERSION = "2026.07.02.2"
 
 
 @dataclass
@@ -80,25 +80,75 @@ def decode_csv(content: bytes) -> str:
 def read_csv(content: bytes) -> Tuple[List[str], List[Dict[str, str]]]:
     text = decode_csv(content)
     sample = text[:4096]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-    except csv.Error:
-        dialect = csv.excel
-        if sample.count(";") > sample.count(","):
-            dialect.delimiter = ";"
-    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-    if not reader.fieldnames:
+    delimiter = preferred_delimiter(sample)
+    if delimiter:
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
+            if sample.count(";") > sample.count(","):
+                dialect.delimiter = ";"
+        reader = csv.reader(io.StringIO(text), dialect=dialect)
+    all_rows = [row for row in reader if any((value or "").strip() for value in row)]
+    if not all_rows:
         raise ParseError("CSV has no header row")
-    original_headers = list(reader.fieldnames)
+
+    first_row = [value.strip() for value in all_rows[0]]
+    if looks_like_headerless_abn_tab(first_row):
+        original_headers = [
+            "account_number",
+            "currency",
+            "transaction_date",
+            "opening_balance",
+            "closing_balance",
+            "booking_date",
+            "amount",
+            "description",
+        ]
+        data_rows = all_rows
+    else:
+        original_headers = first_row
+        data_rows = all_rows[1:]
+
     normalized_headers = [normalize_header(header or "") for header in original_headers]
     rows: List[Dict[str, str]] = []
-    for raw_row in reader:
+    for raw_row in data_rows:
         row: Dict[str, str] = {}
-        for original, normalized in zip(original_headers, normalized_headers):
-            row[normalized] = (raw_row.get(original) or "").strip()
+        values = list(raw_row)
+        if len(values) > len(normalized_headers):
+            values = values[: len(normalized_headers) - 1] + [" ".join(values[len(normalized_headers) - 1 :])]
+        for index, normalized in enumerate(normalized_headers):
+            row[normalized] = (values[index] if index < len(values) else "").strip()
         if any(value for value in row.values()):
             rows.append(row)
     return normalized_headers, rows
+
+
+def preferred_delimiter(sample: str) -> str:
+    lines = [line for line in sample.splitlines() if line.strip()][:10]
+    if not lines:
+        return ""
+    tab_counts = [line.count("\t") for line in lines]
+    semicolon_counts = [line.count(";") for line in lines]
+    if min(tab_counts) >= 2:
+        return "\t"
+    if min(semicolon_counts) >= 2:
+        return ";"
+    return ""
+
+
+def looks_like_headerless_abn_tab(row: List[str]) -> bool:
+    if len(row) < 8:
+        return False
+    return (
+        bool(re.fullmatch(r"\d{6,18}", row[0].strip()))
+        and bool(re.fullmatch(r"[A-Z]{3}", row[1].strip().upper()))
+        and bool(re.fullmatch(r"\d{8}", row[2].strip()))
+        and bool(re.fullmatch(r"\d{8}", row[5].strip()))
+        and bool(re.fullmatch(r"-?\d+(?:[,.]\d+)?", row[6].strip()))
+    )
 
 
 def first_value(row: Dict[str, str], *names: str) -> str:
@@ -158,6 +208,8 @@ def detect_institution(filename: str, headers: List[str], requested: Optional[st
     header_set = set(headers)
     if "af_bij" in header_set or "naam_omschrijving" in header_set:
         return "ing"
+    if {"account_number", "transaction_date", "booking_date", "amount", "description"} <= header_set:
+        return "abn"
     if "tegenrekeningnummer" in header_set or "boekdatum" in header_set:
         return "abn"
     if "clientaccountid" in header_set or "asset_category" in header_set or "ibkr" in name:
@@ -202,13 +254,13 @@ def parse_row(institution: str, row: Dict[str, str], row_number: int, account_hi
 def parse_ing(row: Dict[str, str], row_number: int, account_hint: str) -> ParsedTransaction:
     date = parse_date(first_value(row, "datum", "date", "booking_date"))
     debit_credit = first_value(row, "af_bij", "debit_credit", "credit_debit")
-    amount = parse_amount(first_value(row, "bedrag_eur", "bedrag", "amount"), debit_credit)
+    amount = parse_amount(first_value(row, "bedrag_eur", "amount_eur", "bedrag", "amount"), debit_credit)
     description = " ".join(
         part
         for part in [
             first_value(row, "naam_omschrijving", "name_description"),
             first_value(row, "mutatiesoort", "transaction_type"),
-            first_value(row, "mededelingen", "description"),
+            first_value(row, "mededelingen", "notifications", "description"),
         ]
         if part
     )
@@ -250,6 +302,7 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
     own_account = first_value(row, "rekeningnummer", "account", "account_number") or account_hint or "ABN account"
     counterparty_account = first_value(row, "tegenrekeningnummer", "tegenrekening", "counter_account")
     currency = first_value(row, "valuta", "currency") or "EUR"
+    booking_date = first_value(row, "booking_date", "boekdatum", "datum", "date", "transaction_date")
     return ParsedTransaction(
         row_number=row_number,
         raw=row,
@@ -257,7 +310,7 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
         account_hint=account_hint or own_account,
         account_identifier=own_account,
         transaction_date=date,
-        booking_date=date,
+        booking_date=parse_date(booking_date) if booking_date else date,
         amount=amount,
         currency=currency,
         counterparty_name=counterparty,

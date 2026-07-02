@@ -53,6 +53,7 @@ Implemented MVP:
 
 - SQLite schema
 - CSV parser profiles for common ING, ABN AMRO, IBKR, DeGiro, and generic exports
+- headerless ABN `.TAB` exports and ING `Amount (EUR)` CSV exports
 - import and deduplication pipeline
 - account roles
 - classification engine
