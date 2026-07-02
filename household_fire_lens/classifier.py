@@ -47,7 +47,8 @@ REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "C
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
 SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
 CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
-PAYMENT_PROCESSOR_KEYWORDS = ("STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE")
+CASH_WITHDRAWAL_KEYWORDS = ("GELDMAAT", "ATM", "CASH WITHDRAWAL", "CONTANTOPNAME", "GELDAUTOMAAT")
+CARD_TERMINAL_PROCESSOR_KEYWORDS = ("ZETTLE", "SUMUP", "PAY.NL", "STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE")
 RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 MAX_OPEN_REVIEW_GROUPS = 150
@@ -225,6 +226,9 @@ def classify_transaction(
     if amount < 0 and any(keyword in text for keyword in CARD_KEYWORDS):
         return Annotation("household_spend", "Unknown Card Spend", "", 0.72, "Credit card settlement; detailed card import optional")
 
+    if amount < 0 and any(keyword in text for keyword in CASH_WITHDRAWAL_KEYWORDS):
+        return Annotation("household_spend", "Cash Withdrawal", "", 0.86, "ATM or Geldmaat cash withdrawal")
+
     if any(keyword in text for keyword in SAVINGS_KEYWORDS):
         return Annotation("internal_transfer", "Inter-account Transfers", "Savings", 0.74, "Savings or own-account keyword")
 
@@ -245,7 +249,7 @@ def classify_transaction(
             f"Free public entity lookup: {public_hint.label or public_hint.source}",
         )
 
-    if amount < 0 and any(keyword in text for keyword in PAYMENT_PROCESSOR_KEYWORDS):
+    if amount < 0 and any(keyword in text for keyword in CARD_TERMINAL_PROCESSOR_KEYWORDS):
         return Annotation("household_spend", "Other", "Payment Processor", 0.62, "Payment processor transaction with extracted merchant")
 
     if abs(amount) >= 50:

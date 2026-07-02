@@ -180,6 +180,39 @@ class DomainTests(unittest.TestCase):
         self.assertIn("Holiday", categories)
         self.assertIn("Other", categories)
 
+    def test_cash_withdrawal_terminal_and_processor_descriptions_are_not_review(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,Geldmaat cash withdrawal,Geldmaat,-200.00,EUR
+2026-05-02,Main,ZETTLE BROWN LASER CL,ZETTLE BROWN LASER CL,-85.00,EUR
+2026-05-03,Main,ALBERT HEIJN AMSTELVEEN NLD PAYMENT TERMINAL CARD NO 18 DATE 02 05 TIME 17 13 TRANSACTION I14134 TER,ALBERT HEIJN AMSTELVEEN NLD PAYMENT TERMINAL CARD NO 18 DATE 02 05 TIME 17 13 TRANSACTION I14134 TER,-34.56,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-terminal-cleanup.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.normalized_merchant, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(rows["GELDMAAT"]["category"], "Cash Withdrawal")
+        self.assertEqual(rows["BROWN LASER CL"]["category"], "Other")
+        self.assertEqual(rows["BROWN LASER CL"]["subcategory"], "Payment Processor")
+        self.assertEqual(rows["ALBERT HEIJN AMSTELVEEN"]["category"], "Groceries")
+        self.assertEqual(review_count, 0)
+
     def test_savings_keyword_uses_inter_account_transfer_bucket(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-05-01,Main,Savings transfer to own account,Own savings,-250.00,EUR

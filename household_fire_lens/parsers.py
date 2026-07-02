@@ -15,6 +15,9 @@ IBAN_TEXT_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?:[\s-]?[A-Z0-9]){10,30}\b")
 PAYMENT_PROCESSOR_PATTERNS = (
     re.compile(r"^(?P<merchant>.+?)\s+VIA\s+STICHTING\s+MOLLIE\s+PAYMENTS\b"),
     re.compile(r"^(?P<merchant>.+?)\s+VIA\s+MOLLIE\b"),
+    re.compile(r"^ZETTLE\s+(?P<merchant>.+)$"),
+    re.compile(r"^SUMUP\s+(?P<merchant>.+)$"),
+    re.compile(r"^PAY\.NL\s+(?P<merchant>.+)$"),
 )
 IBAN_LENGTHS = {
     "AD": 24,
@@ -137,9 +140,13 @@ def normalize_merchant(value: str) -> str:
         if match:
             text = match.group("merchant")
             break
+    text = re.split(r"\bPAYMENT TERMINAL\b", text, maxsplit=1)[0]
+    text = re.split(r"\bCARD NO\b", text, maxsplit=1)[0]
+    text = re.split(r"\bDATE\b", text, maxsplit=1)[0]
+    text = re.sub(r"\b(NLD|NL|NETHERLANDS|NEDERLAND)\b$", " ", text.strip())
     text = re.sub(r"\bNL\d{2}[A-Z0-9]{4}\d{10}\b", " ", text)
     text = re.sub(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", " ", text)
-    text = re.sub(r"\b(BETAALAUTOMAAT|PASVOLGNR|TRANSACTIE|KENMERK|MACHTIGING|INCASSO)\b", " ", text)
+    text = re.sub(r"\b(BETAALAUTOMAAT|PASVOLGNR|TRANSACTIE|TRANSACTION|KENMERK|MACHTIGING|INCASSO|TERMINAL)\b", " ", text)
     text = re.sub(r"\b\d{4,}\b", " ", text)
     text = re.sub(r"[^A-Z0-9&.+ ]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
