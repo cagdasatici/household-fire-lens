@@ -21,6 +21,7 @@ from .aggregation import (
 )
 from .classifier import classify_all, create_rule_from_review
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
+from .entity_resolver import enrich_candidate_merchants
 from .importer import import_csv
 
 
@@ -61,6 +62,8 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 self.handle_amortization_status(rule_id)
             elif parsed.path == "/api/reclassify":
                 self.handle_reclassify()
+            elif parsed.path == "/api/entity-enrichment/run":
+                self.handle_entity_enrichment()
             else:
                 self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:  # pragma: no cover
@@ -120,6 +123,21 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json(fire_snapshot(self.conn)["data_health"])
         elif path == "/api/rules":
             self.send_json({"rules": fetch_all(self.conn, "SELECT * FROM classification_rules ORDER BY priority, id")})
+        elif path == "/api/entity-enrichment":
+            self.send_json(
+                {
+                    "cache": fetch_all(
+                        self.conn,
+                        """
+                        SELECT lookup_key, merchant_name, source, source_url, label, description,
+                               economic_class, category, subcategory, confidence, status, updated_at
+                        FROM entity_enrichment_cache
+                        ORDER BY updated_at DESC, lookup_key
+                        LIMIT 250
+                        """,
+                    )
+                }
+            )
         else:
             self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -269,6 +287,14 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         counts = classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"classified": counts})
+
+    def handle_entity_enrichment(self) -> None:
+        body = self.read_json()
+        limit = max(1, min(int(body.get("limit", 50)), 100))
+        summary = enrich_candidate_merchants(self.conn, limit=limit)
+        counts = classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"enrichment": summary, "classified": counts})
 
     def list_transactions(self, query: Dict[str, Any]) -> Any:
         clauses = ["1 = 1"]

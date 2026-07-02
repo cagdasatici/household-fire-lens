@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect_database(path: str) -> sqlite3.Connection:
@@ -167,6 +167,25 @@ def migrate(conn: sqlite3.Connection) -> None:
             savings_rate_fire REAL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS entity_enrichment_cache (
+            lookup_key TEXT PRIMARY KEY,
+            merchant_name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_url TEXT,
+            label TEXT,
+            description TEXT,
+            economic_class TEXT,
+            category TEXT,
+            subcategory TEXT,
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            raw_json TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entity_enrichment_status ON entity_enrichment_cache(status);
+        CREATE INDEX IF NOT EXISTS idx_entity_enrichment_category ON entity_enrichment_cache(category);
         """
     )
     conn.execute(

@@ -8,6 +8,7 @@ from datetime import date, datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .database import json_dumps, json_loads
+from .entity_resolver import EntityHint, cached_hint_for_merchant, load_entity_hints
 
 
 ECONOMIC_CLASSES = {
@@ -98,6 +99,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
         )
 
     user_rules = load_enabled_rules(conn)
+    entity_hints = load_entity_hints(conn)
     counts: Dict[str, int] = defaultdict(int)
     for tx in transactions:
         annotation = classify_transaction(
@@ -106,6 +108,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             linked_transfer_ids=linked_transfer_ids,
             refund_category_by_id=refund_category_by_id,
             user_rules=user_rules,
+            entity_hints=entity_hints,
         )
         counts[annotation.economic_class] += 1
         conn.execute(
@@ -167,6 +170,7 @@ def classify_transaction(
     linked_transfer_ids: Iterable[int],
     refund_category_by_id: Dict[int, Tuple[str, str]],
     user_rules: List[Dict],
+    entity_hints: Optional[Dict[str, EntityHint]] = None,
 ) -> Annotation:
     text = tx_text(tx)
     amount = float(tx["amount"])
@@ -230,6 +234,16 @@ def classify_transaction(
     category, subcategory, confidence, explanation = categorize_merchant(text)
     if category:
         return Annotation("household_spend", category, subcategory, confidence, explanation)
+
+    public_hint = cached_hint_for_merchant(entity_hints or {}, tx.get("normalized_merchant") or "")
+    if public_hint and amount < 0:
+        return Annotation(
+            public_hint.economic_class,
+            public_hint.category,
+            public_hint.subcategory,
+            public_hint.confidence,
+            f"Free public entity lookup: {public_hint.label or public_hint.source}",
+        )
 
     if amount < 0 and any(keyword in text for keyword in PAYMENT_PROCESSOR_KEYWORDS):
         return Annotation("household_spend", "Other", "Payment Processor", 0.62, "Payment processor transaction with extracted merchant")

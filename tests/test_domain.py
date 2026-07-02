@@ -5,6 +5,7 @@ from pathlib import Path
 from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
+from household_fire_lens.entity_resolver import resolve_merchant
 from household_fire_lens.importer import import_csv
 from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
@@ -226,6 +227,41 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["category"], "Other")
         self.assertEqual(row["subcategory"], "Payment Processor")
         self.assertEqual(review_count, 0)
+
+    def test_free_public_entity_cache_classifies_merchant(self):
+        def fake_fetch(_url):
+            return {
+                "search": [
+                    {
+                        "id": "Q123",
+                        "label": "Van Dulken",
+                        "description": "dental clinic in the Netherlands",
+                        "aliases": [],
+                    }
+                ]
+            }
+
+        result = resolve_merchant(self.conn, "Van Dulken", fetch_json=fake_fetch)
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["category"], "Health")
+
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-02,Main,Van Dulken via Stichting Mollie Payments,Van Dulken via Stichting Mollie Payments,-65.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-public-entity-cache.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            "SELECT economic_class, category, explanation FROM transaction_annotations"
+        ).fetchone()
+        self.assertEqual(row["economic_class"], "household_spend")
+        self.assertEqual(row["category"], "Health")
+        self.assertIn("Free public entity lookup", row["explanation"])
 
     def test_svb_child_benefit_is_income_not_review(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

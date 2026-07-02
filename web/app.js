@@ -413,6 +413,27 @@ async function setAmortizationStatus(button) {
   await refreshAll();
 }
 
+async function runEntityEnrichment() {
+  const result = document.getElementById("entity-enrichment-result");
+  const button = document.getElementById("entity-enrichment-button");
+  button.disabled = true;
+  result.textContent = "Looking up...";
+  try {
+    const data = await api("/api/entity-enrichment/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: 50 }),
+    });
+    const summary = data.enrichment || {};
+    result.textContent = `${summary.resolved || 0} resolved · ${summary.unresolved || 0} unresolved · ${summary.error || 0} errors`;
+    await refreshAll();
+  } catch (error) {
+    result.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderHealth(health) {
   setText("health-transactions", health.transactions || 0);
   setText("health-review", health.open_review_items || 0);
@@ -558,6 +579,7 @@ document.addEventListener("change", (event) => {
 });
 
 document.getElementById("refresh-button").addEventListener("click", refreshAll);
+document.getElementById("entity-enrichment-button").addEventListener("click", runEntityEnrichment);
 document.getElementById("fire-multiple").addEventListener("change", loadFire);
 document.getElementById("transaction-search-button").addEventListener("click", loadTransactions);
 ["transaction-class", "transaction-category", "transaction-confidence"].forEach((id) => {
