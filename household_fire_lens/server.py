@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from .aggregation import fire_snapshot, recompute_monthly_snapshots, spending_breakdown
+from .aggregation import (
+    fire_snapshot,
+    list_amortization_rules,
+    optimization_insights,
+    recompute_monthly_snapshots,
+    recurring_merchants,
+    spending_breakdown,
+)
 from .classifier import classify_all, create_rule_from_review
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
 from .importer import import_csv
@@ -49,6 +56,9 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 self.handle_review_resolve(review_id)
             elif parsed.path == "/api/rules":
                 self.handle_create_rule()
+            elif parsed.path.startswith("/api/amortization-rules/"):
+                rule_id = int(parsed.path.split("/")[3])
+                self.handle_amortization_status(rule_id)
             elif parsed.path == "/api/reclassify":
                 self.handle_reclassify()
             else:
@@ -98,6 +108,14 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json({"months": fetch_all(self.conn, "SELECT * FROM monthly_snapshots ORDER BY month")})
         elif path == "/api/dashboard/spending":
             self.send_json(spending_breakdown(self.conn))
+        elif path == "/api/dashboard/optimization":
+            recompute_monthly_snapshots(self.conn)
+            self.send_json(optimization_insights(self.conn))
+        elif path == "/api/recurring":
+            self.send_json({"recurring": recurring_merchants(self.conn)})
+        elif path == "/api/amortization-rules":
+            recompute_monthly_snapshots(self.conn)
+            self.send_json({"amortization_rules": list_amortization_rules(self.conn)})
         elif path == "/api/data-health":
             self.send_json(fire_snapshot(self.conn)["data_health"])
         elif path == "/api/rules":
@@ -231,6 +249,22 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         recompute_monthly_snapshots(self.conn)
         self.send_json({"rule": fetch_one(self.conn, "SELECT * FROM classification_rules WHERE id = ?", (rule_id,))})
 
+    def handle_amortization_status(self, rule_id: int) -> None:
+        body = self.read_json()
+        status = body.get("review_status") or body.get("status")
+        if status not in {"approved", "disabled", "suggested", "auto"}:
+            self.send_json({"error": "Status must be approved, disabled, suggested, or auto"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.conn.execute(
+            "UPDATE amortization_rules SET review_status = ? WHERE id = ?",
+            (status, rule_id),
+        )
+        self.conn.commit()
+        recompute_monthly_snapshots(self.conn)
+        self.send_json(
+            {"rule": fetch_one(self.conn, "SELECT * FROM amortization_rules WHERE id = ?", (rule_id,))}
+        )
+
     def handle_reclassify(self) -> None:
         counts = classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)
@@ -248,6 +282,17 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         if "category" in query:
             clauses.append("ta.category = ?")
             params.append(query["category"][0])
+        if "account_role" in query:
+            clauses.append("a.role = ?")
+            params.append(query["account_role"][0])
+        if "confidence" in query:
+            bucket = query["confidence"][0]
+            if bucket == "low":
+                clauses.append("ta.confidence < 0.65")
+            elif bucket == "medium":
+                clauses.append("ta.confidence >= 0.65 AND ta.confidence < 0.85")
+            elif bucket == "high":
+                clauses.append("ta.confidence >= 0.85")
         if "q" in query:
             clauses.append("(nt.description LIKE ? OR nt.normalized_merchant LIKE ? OR nt.counterparty_name LIKE ?)")
             like = f"%{query['q'][0]}%"
@@ -318,11 +363,14 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
 
     def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         content = json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except BrokenPipeError:
+            return
 
 
 def main() -> None:

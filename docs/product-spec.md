@@ -45,7 +45,8 @@ The product optimizes for sustainable cost-of-living truth, not just pretty expe
 - Booking.com reimbursement clearing against unknown/card spend at monthly level.
 - Internal transfer, investment transfer, mortgage, credit-card settlement, and refund handling.
 - Review queue that creates reusable rules.
-- FIRE Snapshot, Monthly Flow, Spending, Review, Data Health, and Imports views.
+- FIRE Snapshot, Optimization, Monthly Flow, Spending, Review, Data Health, and Imports views.
+- Recurring merchant detection, controllability-ranked optimization queue, trend alerts, and approval-based amortization rules.
 
 ## Stage Roadmap
 

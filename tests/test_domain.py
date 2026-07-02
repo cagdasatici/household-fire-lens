@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from household_fire_lens.aggregation import fire_snapshot, recompute_monthly_snapshots
+from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
 from household_fire_lens.classifier import classify_all
 from household_fire_lens.database import connect_database
 from household_fire_lens.importer import import_csv
@@ -106,6 +106,38 @@ class DomainTests(unittest.TestCase):
         classify_all(self.conn)
         review_count = self.conn.execute("SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'").fetchone()["count"]
         self.assertGreaterEqual(review_count, 1)
+
+    def test_amortization_replaces_lumpy_cashflow_when_approved(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-04,Main,Annual insurance premium,Allianz Insurance,-1200.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-insurance.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        rule = self.conn.execute("SELECT * FROM amortization_rules WHERE review_status = 'suggested'").fetchone()
+        self.assertIsNotNone(rule)
+        january = self.conn.execute("SELECT * FROM monthly_snapshots WHERE month = '2026-01'").fetchone()
+        self.assertEqual(january["household_spend_normalized"], 1200.0)
+
+        self.conn.execute("UPDATE amortization_rules SET review_status = 'approved' WHERE id = ?", (rule["id"],))
+        self.conn.commit()
+        recompute_monthly_snapshots(self.conn)
+        january = self.conn.execute("SELECT * FROM monthly_snapshots WHERE month = '2026-01'").fetchone()
+        self.assertEqual(january["household_spend_cashflow"], 1200.0)
+        self.assertEqual(january["household_spend_normalized"], 100.0)
+
+    def test_optimization_insights_surface_controllable_categories(self):
+        self.import_and_classify()
+        insights = optimization_insights(self.conn)
+        categories = {item["category"] for item in insights["opportunities"]}
+        self.assertIn("Unknown Card Spend", categories)
+        self.assertGreaterEqual(insights["summary"]["months_loaded"], 3)
 
 
 if __name__ == "__main__":

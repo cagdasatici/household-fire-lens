@@ -2,20 +2,57 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
+
+
+CONTROLLABILITY = {
+    "Eating Out": 0.9,
+    "Coffee and Snacks": 0.85,
+    "Shopping": 0.8,
+    "Entertainment": 0.75,
+    "Travel": 0.65,
+    "Subscriptions": 0.65,
+    "Groceries": 0.45,
+    "Transportation": 0.4,
+    "Health": 0.2,
+    "Housing": 0.15,
+    "Taxes and Government": 0.05,
+    "Banking and Fees": 0.5,
+    "Unknown Card Spend": 0.7,
+    "Uncategorized": 0.55,
+}
 
 
 def money(value: float) -> float:
     return round(float(value or 0), 2)
 
 
+def month_add(month: str, offset: int) -> str:
+    year, month_num = [int(part) for part in month.split("-")]
+    total = year * 12 + (month_num - 1) + offset
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def months_between(start_month: str, end_month: str) -> Iterable[str]:
+    current = start_month
+    while current <= end_month:
+        yield current
+        current = month_add(current, 1)
+
+
 def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     conn.execute("DELETE FROM monthly_snapshots")
+    suggest_amortization_rules(conn)
     months = aggregate_months(conn)
-    for month, values in months.items():
+    for month, values in sorted(months.items()):
         real_income = values["real_income"]
-        cashflow_burn = values["household_spend"] + values["mortgage_total"] - values["refunds"] - values["reimbursements_cleared"]
-        normalized_burn = cashflow_burn + values["amortization_delta"]
+        cashflow_burn = (
+            values["household_spend"]
+            + values["mortgage_total"]
+            - values["refunds"]
+            - values["reimbursements_cleared"]
+        )
+        normalized_burn = cashflow_burn - values["amortized_cashflow_replaced"] + values["amortized_monthly_addition"]
         savings_rate_cashflow = ((real_income - cashflow_burn) / real_income) if real_income else None
         savings_rate_fire = ((real_income - normalized_burn) / real_income) if real_income else None
         conn.execute(
@@ -31,7 +68,7 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
                 month,
                 money(real_income),
                 money(cashflow_burn),
-                money(normalized_burn),
+                money(max(0, normalized_burn)),
                 money(values["mortgage_total"]),
                 money(values["wealth_allocation"]),
                 money(values["internal_transfers"]),
@@ -51,6 +88,7 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
     rows = conn.execute(
         """
         SELECT
+            nt.id,
             substr(nt.transaction_date, 1, 7) AS month,
             nt.amount,
             ta.economic_class,
@@ -92,7 +130,8 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
 
     for month, values in months.items():
         values["reimbursements_cleared"] = min(values["reimbursements_received"], unknown_card_spend[month])
-        values["amortization_delta"] = 0.0
+        values["amortized_cashflow_replaced"] = 0.0
+        values["amortized_monthly_addition"] = 0.0
     apply_amortization(conn, months)
     return months
 
@@ -100,21 +139,78 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
 def apply_amortization(conn: sqlite3.Connection, months: Dict[str, Dict[str, float]]) -> None:
     rows = conn.execute(
         """
-        SELECT monthly_amount, start_month, end_month
-        FROM amortization_rules
-        WHERE review_status IN ('approved', 'auto')
+        SELECT ar.*, nt.amount, substr(nt.transaction_date, 1, 7) AS transaction_month
+        FROM amortization_rules ar
+        LEFT JOIN normalized_transactions nt ON nt.id = ar.transaction_id
+        WHERE ar.review_status IN ('approved', 'auto')
         """
     ).fetchall()
     if not rows or not months:
         return
-    month_keys = sorted(months)
     for rule in rows:
-        for month in month_keys:
-            if month < rule["start_month"]:
-                continue
-            if rule["end_month"] and month > rule["end_month"]:
-                continue
-            months[month]["amortization_delta"] += float(rule["monthly_amount"])
+        start_month = rule["start_month"]
+        end_month = rule["end_month"] or month_add(start_month, 11)
+        for month in months_between(start_month, end_month):
+            months[month]["amortized_monthly_addition"] += float(rule["monthly_amount"])
+        if rule["transaction_id"] and rule["transaction_month"]:
+            months[rule["transaction_month"]]["amortized_cashflow_replaced"] += abs(float(rule["amount"] or 0))
+
+
+def suggest_amortization_rules(conn: sqlite3.Connection) -> None:
+    """Create reviewable amortization candidates for lumpy household expenses.
+
+    Suggestions are intentionally conservative. They never affect metrics until approved.
+    """
+
+    existing_rows = conn.execute(
+        "SELECT transaction_id FROM amortization_rules WHERE transaction_id IS NOT NULL"
+    ).fetchall()
+    existing = {row["transaction_id"] for row in existing_rows}
+    candidates = conn.execute(
+        """
+        SELECT
+            nt.id,
+            nt.transaction_date,
+            nt.amount,
+            nt.normalized_merchant,
+            ta.category,
+            ta.subcategory,
+            ta.economic_class
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ABS(nt.amount) >= 600
+          AND ta.economic_class = 'household_spend'
+          AND ta.category NOT IN ('Unknown Card Spend', 'Uncategorized')
+        ORDER BY ABS(nt.amount) DESC
+        """
+    ).fetchall()
+    for row in candidates:
+        if row["id"] in existing:
+            continue
+        merchant = row["normalized_merchant"] or row["category"] or "Annual expense"
+        category = row["category"] or "Uncategorized"
+        annual_amount = abs(float(row["amount"]))
+        start_month = str(row["transaction_date"])[:7]
+        conn.execute(
+            """
+            INSERT INTO amortization_rules (
+                name, category, merchant_pattern, transaction_id, annual_amount,
+                monthly_amount, start_month, end_month, confidence, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.72, 'suggested')
+            """,
+            (
+                f"Amortize {merchant}",
+                category,
+                merchant,
+                row["id"],
+                money(annual_amount),
+                money(annual_amount / 12),
+                start_month,
+                month_add(start_month, 11),
+            ),
+        )
 
 
 def list_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -135,6 +231,7 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict
                 "wealth_allocation": 0,
                 "investment_rate": None,
                 "fi_number": 0,
+                "runway_months": None,
             },
             "data_health": data_health(conn),
         }
@@ -158,6 +255,7 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict
             "investment_rate": investment_rate,
             "fi_number": money(annualized_burn * fire_multiple),
             "fire_multiple": fire_multiple,
+            "runway_months": money(wealth / monthly_burn) if monthly_burn else None,
         },
         "data_health": data_health(conn),
     }
@@ -172,7 +270,8 @@ def spending_breakdown(conn: sqlite3.Connection) -> Dict[str, Any]:
             ta.economic_class,
             SUM(CASE WHEN nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS outflow,
             SUM(CASE WHEN nt.amount > 0 THEN nt.amount ELSE 0 END) AS inflow,
-            COUNT(*) AS count
+            COUNT(*) AS count,
+            AVG(ta.confidence) AS avg_confidence
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
@@ -180,7 +279,213 @@ def spending_breakdown(conn: sqlite3.Connection) -> Dict[str, Any]:
         ORDER BY outflow DESC, inflow DESC
         """
     ).fetchall()
-    return {"breakdown": [dict(row) for row in rows]}
+    category_months = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 7) AS month,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            SUM(CASE WHEN nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS outflow
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+        GROUP BY month, category
+        ORDER BY month, category
+        """
+    ).fetchall()
+    return {
+        "breakdown": [dict(row) for row in rows],
+        "category_months": [dict(row) for row in category_months],
+    }
+
+
+def recurring_merchants(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(nt.normalized_merchant, ''), 'Unknown merchant') AS merchant,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            substr(nt.transaction_date, 1, 7) AS month,
+            SUM(ABS(nt.amount)) AS amount,
+            COUNT(*) AS transactions
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+        GROUP BY merchant, category, month
+        """
+    ).fetchall()
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        key = (row["merchant"], row["category"])
+        item = grouped.setdefault(
+            key,
+            {
+                "merchant": row["merchant"],
+                "category": row["category"],
+                "months": [],
+                "total": 0.0,
+                "transactions": 0,
+            },
+        )
+        item["months"].append({"month": row["month"], "amount": money(row["amount"])})
+        item["total"] += float(row["amount"])
+        item["transactions"] += int(row["transactions"])
+
+    recurring = []
+    for item in grouped.values():
+        month_count = len(item["months"])
+        if month_count < 2 and item["total"] < 500:
+            continue
+        amounts = [float(month["amount"]) for month in item["months"]]
+        avg = item["total"] / max(1, month_count)
+        variance = sum(abs(amount - avg) for amount in amounts) / max(1, month_count)
+        stability = max(0.0, 1.0 - (variance / avg)) if avg else 0.0
+        recurring.append(
+            {
+                "merchant": item["merchant"],
+                "category": item["category"],
+                "months_count": month_count,
+                "monthly_average": money(avg),
+                "annualized": money(avg * 12),
+                "total": money(item["total"]),
+                "transactions": item["transactions"],
+                "stability": money(stability),
+                "cadence": "monthly" if month_count >= 3 and stability >= 0.65 else "recurring",
+            }
+        )
+    recurring.sort(key=lambda row: (row["annualized"], row["months_count"]), reverse=True)
+    return recurring
+
+
+def optimization_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
+    snapshots = list_monthly_snapshots(conn)
+    breakdown = spending_breakdown(conn)["breakdown"]
+    recurring = recurring_merchants(conn)
+    category_rows = [
+        row
+        for row in breakdown
+        if row["economic_class"] in {"household_spend", "debt_service"} and float(row["outflow"] or 0) > 0
+    ]
+    total_burden = sum(float(row["outflow"] or 0) for row in category_rows)
+    opportunities = []
+    for row in category_rows:
+        category = row["category"] or "Uncategorized"
+        outflow = float(row["outflow"] or 0)
+        controllability = CONTROLLABILITY.get(category, 0.5)
+        score = outflow * controllability
+        opportunities.append(
+            {
+                "category": category,
+                "subcategory": row["subcategory"] or "",
+                "economic_class": row["economic_class"],
+                "amount": money(outflow),
+                "share": (outflow / total_burden) if total_burden else 0,
+                "controllability": controllability,
+                "score": money(score),
+                "annualized_impact": money(score),
+                "why": opportunity_reason(category, controllability),
+            }
+        )
+    opportunities.sort(key=lambda row: row["score"], reverse=True)
+    trend_alerts = category_trends(conn)
+    amortization = list_amortization_rules(conn)
+    return {
+        "opportunities": opportunities[:8],
+        "recurring": recurring[:12],
+        "trend_alerts": trend_alerts[:8],
+        "amortization_rules": amortization,
+        "snapshot": fire_snapshot(conn),
+        "summary": {
+            "months_loaded": len(snapshots),
+            "total_burden": money(total_burden),
+            "suggested_amortizations": len([rule for rule in amortization if rule["review_status"] == "suggested"]),
+            "recurring_merchants": len(recurring),
+        },
+    }
+
+
+def category_trends(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 7) AS month,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            SUM(CASE WHEN nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS outflow
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+        GROUP BY month, category
+        ORDER BY month
+        """
+    ).fetchall()
+    months = sorted({row["month"] for row in rows})
+    if len(months) < 4:
+        return []
+    recent_months = set(months[-3:])
+    prior_months = set(months[-6:-3])
+    by_category: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for row in rows:
+        if row["month"] in recent_months:
+            by_category[row["category"]]["recent"] += float(row["outflow"])
+        elif row["month"] in prior_months:
+            by_category[row["category"]]["prior"] += float(row["outflow"])
+    alerts = []
+    for category, values in by_category.items():
+        recent_avg = values["recent"] / max(1, len(recent_months))
+        prior_avg = values["prior"] / max(1, len(prior_months))
+        if recent_avg < 75:
+            continue
+        change = (recent_avg - prior_avg) / prior_avg if prior_avg else 1.0
+        if change < 0.15:
+            continue
+        alerts.append(
+            {
+                "category": category,
+                "recent_monthly_average": money(recent_avg),
+                "prior_monthly_average": money(prior_avg),
+                "change": change,
+                "monthly_delta": money(recent_avg - prior_avg),
+            }
+        )
+    alerts.sort(key=lambda row: row["monthly_delta"], reverse=True)
+    return alerts
+
+
+def list_amortization_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            ar.*,
+            nt.transaction_date,
+            nt.description,
+            nt.normalized_merchant
+        FROM amortization_rules ar
+        LEFT JOIN normalized_transactions nt ON nt.id = ar.transaction_id
+        ORDER BY
+            CASE ar.review_status
+                WHEN 'suggested' THEN 0
+                WHEN 'approved' THEN 1
+                ELSE 2
+            END,
+            ar.annual_amount DESC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def opportunity_reason(category: str, controllability: float) -> str:
+    if category == "Unknown Card Spend":
+        return "Material card bucket; optional card import or merchant rules would improve the picture."
+    if category == "Uncategorized":
+        return "Classification uncertainty is large enough to affect FIRE burn."
+    if controllability >= 0.75:
+        return "High-control variable spending; optimization here can move savings rate without structural changes."
+    if controllability >= 0.45:
+        return "Partly controllable spending; trend and merchant review are more useful than blanket cuts."
+    return "Mostly fixed or low-control spending; optimize by contract review, refinancing, or long-cycle decisions."
 
 
 def data_health(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -196,6 +501,24 @@ def data_health(conn: sqlite3.Connection) -> Dict[str, Any]:
         WHERE ta.economic_class = 'needs_review' AND nt.is_duplicate = 0
         """
     ).fetchone()["amount"]
+    unknown_card_spend = conn.execute(
+        """
+        SELECT COALESCE(SUM(ABS(nt.amount)), 0) AS amount
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE ta.category = 'Unknown Card Spend'
+          AND nt.amount < 0
+          AND nt.is_duplicate = 0
+        """
+    ).fetchone()["amount"]
+    reimbursement_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(reimbursements_received), 0) AS received,
+            COALESCE(SUM(reimbursements_cleared), 0) AS cleared
+        FROM monthly_snapshots
+        """
+    ).fetchone()
     confidence_rows = conn.execute(
         """
         SELECT
@@ -212,11 +535,17 @@ def data_health(conn: sqlite3.Connection) -> Dict[str, Any]:
         """
     ).fetchall()
     confidence = {row["bucket"]: money(row["amount"]) for row in confidence_rows}
+    received = float(reimbursement_rows["received"] if reimbursement_rows else 0)
+    cleared = float(reimbursement_rows["cleared"] if reimbursement_rows else 0)
     return {
         "transactions": total,
         "annotated": annotated,
         "duplicates": duplicate,
         "open_review_items": review,
         "needs_review_amount": money(needs_review_amount),
+        "unknown_card_spend": money(unknown_card_spend),
+        "reimbursements_received": money(received),
+        "reimbursements_cleared": money(cleared),
+        "reimbursement_uncleared": money(received - cleared),
         "confidence_by_value": confidence,
     }

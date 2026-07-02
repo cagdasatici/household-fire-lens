@@ -10,7 +10,8 @@ Local-first household economics for FIRE planning. Import messy yearly bank and 
 - Detects salary using recurring payer, date window, and amount similarity.
 - Clears Booking.com reimbursements without requiring credit card statement imports.
 - Separates Cashflow and Normalized FIRE views.
-- Shows FIRE burn, savings rate, investment rate, data-health warnings, review items, and drillable transaction tables.
+- Shows FIRE burn, savings rate, investment rate, optimization opportunities, recurring spend, data-health warnings, review items, and drillable transaction tables.
+- Suggests amortization rules for lumpy annual expenses and applies them only after approval.
 
 The first implementation is deliberately local and dependency-light: Python standard library, SQLite, and a static dashboard.
 
@@ -58,7 +59,8 @@ Implemented MVP:
 - salary, transfer, investment, mortgage, Booking.com reimbursement, card settlement, refund, and merchant category handling
 - monthly aggregation
 - FIRE dashboard APIs
-- local dashboard UI
+- dark local dashboard UI
+- optimization queue, recurring merchant detection, trend alerts, and amortization approvals
 - review queue and reusable classification rules
 - focused domain tests with synthetic data
 

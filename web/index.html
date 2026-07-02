@@ -12,17 +12,22 @@
         <div class="brand-mark">FL</div>
         <div>
           <h1>Household FIRE Lens</h1>
-          <p>Local household economics</p>
+          <p>Local FIRE cockpit</p>
         </div>
       </div>
       <nav>
         <button class="nav-item active" data-view="fire">FIRE Snapshot</button>
+        <button class="nav-item" data-view="optimization">Optimization</button>
         <button class="nav-item" data-view="flow">Monthly Flow</button>
         <button class="nav-item" data-view="spending">Spending</button>
         <button class="nav-item" data-view="review">Review</button>
         <button class="nav-item" data-view="health">Data Health</button>
         <button class="nav-item" data-view="imports">Imports</button>
       </nav>
+      <div class="side-status">
+        <span>Local database</span>
+        <strong id="side-db-status">checking</strong>
+      </div>
     </aside>
 
     <main>
@@ -42,37 +47,105 @@
 
       <section id="fire" class="view active">
         <div class="metric-grid">
-          <article class="metric">
+          <article class="metric primary">
             <span>Monthly FIRE burn</span>
-            <strong id="monthly-burn">€0</strong>
+            <strong id="monthly-burn">EUR 0</strong>
+            <small>Normalized household burden</small>
           </article>
           <article class="metric">
             <span>Annualized burn</span>
-            <strong id="annual-burn">€0</strong>
+            <strong id="annual-burn">EUR 0</strong>
+            <small>Current run-rate</small>
           </article>
           <article class="metric">
             <span>FIRE savings rate</span>
             <strong id="savings-rate">n/a</strong>
+            <small>After normalized burn</small>
           </article>
           <article class="metric">
             <span>FI number</span>
-            <strong id="fi-number">€0</strong>
+            <strong id="fi-number">EUR 0</strong>
+            <small id="fi-multiple-label">25x annual burn</small>
           </article>
           <article class="metric">
             <span>Wealth allocation</span>
-            <strong id="wealth-allocation">€0</strong>
+            <strong id="wealth-allocation">EUR 0</strong>
+            <small>Investments from cashflow</small>
           </article>
           <article class="metric">
             <span>Investment rate</span>
             <strong id="investment-rate">n/a</strong>
+            <small id="runway-months">Runway n/a</small>
+          </article>
+        </div>
+        <div class="split-grid">
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Burn Line</h3>
+              <span>Cashflow versus normalized FIRE view</span>
+            </div>
+            <div id="burn-chart" class="bar-chart"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Trust Signals</h3>
+              <span>Classification and reimbursement state</span>
+            </div>
+            <div id="trust-list" class="signal-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="optimization" class="view">
+        <div class="metric-grid compact">
+          <article class="metric">
+            <span>Loaded months</span>
+            <strong id="opt-months">0</strong>
+          </article>
+          <article class="metric">
+            <span>Total burden</span>
+            <strong id="opt-burden">EUR 0</strong>
+          </article>
+          <article class="metric">
+            <span>Recurring merchants</span>
+            <strong id="opt-recurring">0</strong>
+          </article>
+          <article class="metric">
+            <span>Amortization suggestions</span>
+            <strong id="opt-amortizations">0</strong>
           </article>
         </div>
         <div class="panel">
           <div class="panel-heading">
-            <h3>Monthly Burn</h3>
-            <span>Cashflow and normalized FIRE view</span>
+            <h3>Optimization Queue</h3>
+            <span>Ranked by amount, controllability, and FIRE impact</span>
           </div>
-          <div id="burn-chart" class="bar-chart"></div>
+          <div id="opportunity-list" class="opportunity-grid"></div>
+        </div>
+        <div class="split-grid">
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Recurring Spend</h3>
+              <span>Merchant-level cadence detection</span>
+            </div>
+            <div class="table-wrap">
+              <table id="recurring-table"></table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Trend Alerts</h3>
+              <span>Recent three months versus prior three</span>
+            </div>
+            <div id="trend-list" class="signal-list"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Amortization</h3>
+            <span>Approve lumpy annual costs for normalized FIRE burn</span>
+          </div>
+          <div id="amortization-list" class="rule-list"></div>
         </div>
       </section>
 
@@ -100,12 +173,39 @@
         </div>
         <div class="panel">
           <div class="panel-heading">
-            <h3>Recent Transactions</h3>
-            <span>Drill into the numbers behind the dashboard.</span>
+            <h3>Category Months</h3>
+            <span>Monthly household burden by category</span>
+          </div>
+          <div id="category-months" class="matrix"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Transactions</h3>
+            <span>Trace dashboard numbers back to source rows.</span>
           </div>
           <div class="filters">
-            <input id="transaction-search" type="search" placeholder="Filter transactions" />
-            <button id="transaction-search-button">Search</button>
+            <input id="transaction-search" type="search" placeholder="Merchant or description" />
+            <select id="transaction-class">
+              <option value="">All classes</option>
+              <option value="income">Income</option>
+              <option value="household_spend">Household spend</option>
+              <option value="wealth_allocation">Wealth allocation</option>
+              <option value="internal_transfer">Internal transfer</option>
+              <option value="debt_service">Debt service</option>
+              <option value="reimbursement_pass_through">Reimbursement</option>
+              <option value="refund">Refund</option>
+              <option value="needs_review">Needs review</option>
+            </select>
+            <select id="transaction-category">
+              <option value="">All categories</option>
+            </select>
+            <select id="transaction-confidence">
+              <option value="">All confidence</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <button id="transaction-search-button">Apply</button>
           </div>
           <div class="table-wrap">
             <table id="transactions-table"></table>
@@ -117,14 +217,14 @@
         <div class="panel">
           <div class="panel-heading">
             <h3>Review Queue</h3>
-            <span>Only material uncertainty should appear here.</span>
+            <span>Approve durable rules only when material uncertainty remains.</span>
           </div>
           <div id="review-list" class="review-list"></div>
         </div>
       </section>
 
       <section id="health" class="view">
-        <div class="metric-grid">
+        <div class="metric-grid compact">
           <article class="metric">
             <span>Transactions</span>
             <strong id="health-transactions">0</strong>
@@ -139,8 +239,23 @@
           </article>
           <article class="metric">
             <span>Needs-review amount</span>
-            <strong id="health-unknown">€0</strong>
+            <strong id="health-unknown">EUR 0</strong>
           </article>
+          <article class="metric">
+            <span>Unknown card spend</span>
+            <strong id="health-card">EUR 0</strong>
+          </article>
+          <article class="metric">
+            <span>Uncleared reimbursements</span>
+            <strong id="health-reimbursement">EUR 0</strong>
+          </article>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Confidence by Value</h3>
+            <span>Where the dashboard is strong or still uncertain</span>
+          </div>
+          <div id="confidence-bars" class="bar-chart"></div>
         </div>
       </section>
 
@@ -148,7 +263,7 @@
         <div class="panel">
           <div class="panel-heading">
             <h3>Import CSV</h3>
-            <span>Choose an institution and account role once; rules handle the rest.</span>
+            <span>Choose account role once; classification uses it everywhere.</span>
           </div>
           <form id="import-form" class="import-form">
             <input name="file" type="file" accept=".csv,.tsv,text/csv" required />
@@ -173,22 +288,33 @@
           </form>
           <pre id="import-result"></pre>
         </div>
-        <div class="panel">
-          <div class="panel-heading">
-            <h3>Accounts</h3>
-            <span>Roles drive transfer, investment, and mortgage treatment.</span>
+        <div class="split-grid">
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Accounts</h3>
+              <span>Editable roles drive transfer and wealth logic.</span>
+            </div>
+            <div class="table-wrap">
+              <table id="accounts-table"></table>
+            </div>
           </div>
-          <div class="table-wrap">
-            <table id="accounts-table"></table>
+          <div class="panel">
+            <div class="panel-heading">
+              <h3>Imported Files</h3>
+              <span>Raw file hashes prevent duplicate imports.</span>
+            </div>
+            <div class="table-wrap">
+              <table id="imports-table"></table>
+            </div>
           </div>
         </div>
         <div class="panel">
           <div class="panel-heading">
-            <h3>Imported Files</h3>
-            <span>Raw file hashes prevent duplicate imports.</span>
+            <h3>Rules</h3>
+            <span>User-approved rules applied before heuristics.</span>
           </div>
           <div class="table-wrap">
-            <table id="imports-table"></table>
+            <table id="rules-table"></table>
           </div>
         </div>
       </section>
