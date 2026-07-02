@@ -43,6 +43,8 @@ BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "B
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
+RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
+GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 
 
 @dataclass
@@ -361,11 +363,17 @@ def categorize_merchant(text: str) -> Tuple[str, str, float, str]:
 
 
 def rule_matches(tx: Dict, conditions: Dict) -> bool:
+    if not rule_is_safely_scoped(conditions):
+        return False
     text = tx_text(tx)
+    transaction_id = conditions.get("transaction_id")
     merchant_contains = str(conditions.get("merchant_contains", "")).upper()
     description_contains = str(conditions.get("description_contains", "")).upper()
     min_amount = conditions.get("min_abs_amount")
     account_role = conditions.get("account_role")
+    direction = conditions.get("direction")
+    if transaction_id is not None and int(transaction_id) != int(tx["id"]):
+        return False
     if merchant_contains and merchant_contains not in text:
         return False
     if description_contains and description_contains not in text:
@@ -374,7 +382,33 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
         return False
     if account_role and tx["account_role"] != account_role:
         return False
+    if direction and tx["direction"] != direction:
+        return False
     return True
+
+
+def rule_is_safely_scoped(conditions: Dict) -> bool:
+    if conditions.get("transaction_id") is not None:
+        return True
+    merchant_contains = str(conditions.get("merchant_contains", "")).strip().upper()
+    description_contains = str(conditions.get("description_contains", "")).strip().upper()
+    account_role = str(conditions.get("account_role", "")).strip()
+    if merchant_is_safe_scope(merchant_contains):
+        return True
+    if len(description_contains) >= 8:
+        return True
+    if account_role and (merchant_is_safe_scope(merchant_contains) or len(description_contains) >= 8):
+        return True
+    return False
+
+
+def merchant_is_safe_scope(merchant: str) -> bool:
+    merchant = " ".join(merchant.strip().upper().split())
+    if len(merchant) < 4:
+        return False
+    if merchant in GENERIC_MERCHANT_SCOPES:
+        return False
+    return any(char.isalpha() for char in merchant)
 
 
 def create_review_items(conn: sqlite3.Connection) -> None:
@@ -421,13 +455,16 @@ def create_rule_from_review(
     merchant_scope: bool = True,
 ) -> int:
     tx = conn.execute(
-        "SELECT normalized_merchant FROM normalized_transactions WHERE id = ?",
+        "SELECT normalized_merchant, direction FROM normalized_transactions WHERE id = ?",
         (transaction_id,),
     ).fetchone()
     if not tx:
         raise ValueError("Transaction not found")
     merchant = tx["normalized_merchant"] or ""
-    conditions = {"merchant_contains": merchant} if merchant_scope and merchant else {"min_abs_amount": 0}
+    if economic_class in RISKY_REVIEW_CLASSES or not (merchant_scope and merchant_is_safe_scope(merchant)):
+        conditions = {"transaction_id": transaction_id}
+    else:
+        conditions = {"merchant_contains": merchant, "direction": tx["direction"]}
     actions = {
         "economic_class": economic_class,
         "category": category,

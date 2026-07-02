@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
-from household_fire_lens.classifier import classify_all
+from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.importer import import_csv
 from household_fire_lens.parsers import parse_transactions
@@ -176,6 +176,60 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(parsed[0].amount, 5000.0)
         self.assertEqual(parsed[1].amount, -12.34)
         self.assertIn("Salary text", parsed[0].description)
+
+    def test_unscoped_review_rule_does_not_classify_everything(self):
+        self.import_and_classify()
+        self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (
+                'Bad broad rule', 1, '{"min_abs_amount": 0}',
+                '{"economic_class": "wealth_allocation", "category": "Investments", "subcategory": ""}',
+                0.96, 'user', 1
+            )
+            """
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        counts = {
+            row["economic_class"]: row["count"]
+            for row in self.conn.execute(
+                "SELECT economic_class, COUNT(*) AS count FROM transaction_annotations GROUP BY economic_class"
+            )
+        }
+        self.assertGreater(counts.get("household_spend", 0), 0)
+        self.assertGreater(counts.get("income", 0), 0)
+
+    def test_investment_review_rule_is_transaction_specific(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,Mystery transfer,, -250.00,EUR
+2026-04-02,Main,Mystery transfer,, -80.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-risky-review.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = -250"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(self.conn, tx_id, "wealth_allocation", "Investments")
+        self.conn.commit()
+        classify_all(self.conn)
+        rule = self.conn.execute("SELECT conditions_json FROM classification_rules WHERE id = ?", (rule_id,)).fetchone()
+        self.assertIn("transaction_id", rule["conditions_json"])
+        wealth_count = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM transaction_annotations
+            WHERE economic_class = 'wealth_allocation'
+            """
+        ).fetchone()["count"]
+        self.assertEqual(wealth_count, 1)
 
 
 if __name__ == "__main__":
