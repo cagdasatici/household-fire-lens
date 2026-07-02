@@ -6,7 +6,7 @@ from household_fire_lens.aggregation import fire_snapshot, optimization_insights
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.importer import import_csv
-from household_fire_lens.parsers import parse_transactions
+from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
 
 ING_CSV = """Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag (EUR);MutatieSoort;Mededelingen
@@ -197,6 +197,54 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["economic_class"], "internal_transfer")
         self.assertEqual(row["category"], "Inter-account Transfers")
         self.assertEqual(row["subcategory"], "Savings")
+
+    def test_mollie_payment_processor_keeps_embedded_merchant(self):
+        self.assertEqual(
+            normalize_merchant("Van Dulken via Stichting Mollie Payments"),
+            "VAN DULKEN",
+        )
+
+    def test_unknown_mollie_processor_payment_defaults_to_other(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-02,Main,Van Dulken via Stichting Mollie Payments,Van Dulken via Stichting Mollie Payments,-65.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-mollie-processor.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations"
+        ).fetchone()
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(row["economic_class"], "household_spend")
+        self.assertEqual(row["category"], "Other")
+        self.assertEqual(row["subcategory"], "Payment Processor")
+        self.assertEqual(review_count, 0)
+
+    def test_svb_child_benefit_is_income_not_review(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-02,Main,SEPA OVERBOEKING IBAN BIC RABONL2U NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER,Sociale Verzekeringsbank,286.45,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-svb-benefit.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations"
+        ).fetchone()
+        self.assertEqual(row["economic_class"], "income")
+        self.assertEqual(row["category"], "Benefits")
+        self.assertEqual(row["subcategory"], "Child Benefit")
 
     def test_headerless_abn_tab_export_parses(self):
         institution, parsed = parse_transactions(

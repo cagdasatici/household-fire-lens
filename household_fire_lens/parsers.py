@@ -9,9 +9,13 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-PARSER_VERSION = "2026.07.02.3"
+PARSER_VERSION = "2026.07.02.4"
 IBAN_PATTERN = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
 IBAN_TEXT_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?:[\s-]?[A-Z0-9]){10,30}\b")
+PAYMENT_PROCESSOR_PATTERNS = (
+    re.compile(r"^(?P<merchant>.+?)\s+VIA\s+STICHTING\s+MOLLIE\s+PAYMENTS\b"),
+    re.compile(r"^(?P<merchant>.+?)\s+VIA\s+MOLLIE\b"),
+)
 IBAN_LENGTHS = {
     "AD": 24,
     "AE": 23,
@@ -128,6 +132,11 @@ def normalize_header(value: str) -> str:
 
 def normalize_merchant(value: str) -> str:
     text = (value or "").upper()
+    for pattern in PAYMENT_PROCESSOR_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            text = match.group("merchant")
+            break
     text = re.sub(r"\bNL\d{2}[A-Z0-9]{4}\d{10}\b", " ", text)
     text = re.sub(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b", " ", text)
     text = re.sub(r"\b(BETAALAUTOMAAT|PASVOLGNR|TRANSACTIE|KENMERK|MACHTIGING|INCASSO)\b", " ", text)

@@ -44,6 +44,9 @@ BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "B
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
+SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
+CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
+PAYMENT_PROCESSOR_KEYWORDS = ("STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE")
 RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 MAX_OPEN_REVIEW_GROUPS = 150
@@ -189,6 +192,11 @@ def classify_transaction(
     if tx["id"] in salary_set:
         return Annotation("income", "Income", "Salary", 0.94, "Recurring salary pattern: payer/date window/amount similarity")
 
+    if amount > 0 and any(keyword in text for keyword in SOCIAL_INSURANCE_KEYWORDS):
+        if any(keyword in text for keyword in CHILD_BENEFIT_KEYWORDS):
+            return Annotation("income", "Benefits", "Child Benefit", 0.94, "Dutch SVB child-benefit payment")
+        return Annotation("income", "Benefits", "Government Benefit", 0.88, "Dutch SVB payment")
+
     if any(keyword in text for keyword in BOOKING_REIMBURSEMENT_KEYWORDS) and amount > 0:
         return Annotation("reimbursement_pass_through", "Reimbursements", "Booking.com", 0.93, "Booking.com reimbursement deposit")
 
@@ -222,6 +230,9 @@ def classify_transaction(
     category, subcategory, confidence, explanation = categorize_merchant(text)
     if category:
         return Annotation("household_spend", category, subcategory, confidence, explanation)
+
+    if amount < 0 and any(keyword in text for keyword in PAYMENT_PROCESSOR_KEYWORDS):
+        return Annotation("household_spend", "Other", "Payment Processor", 0.62, "Payment processor transaction with extracted merchant")
 
     if abs(amount) >= 50:
         return Annotation("needs_review", "Uncategorized", "", 0.4, "Material outflow needs classification")
