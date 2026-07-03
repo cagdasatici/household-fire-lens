@@ -40,12 +40,13 @@ private/
 *booking*.pdf
 *Booking*.pdf
 
-# Allow synthetic, non-personal project fixtures
+# Allow synthetic, non-personal project fixtures and public docs
 !tests/
 !tests/fixtures/
 !tests/fixtures/**
-!docs/
-!docs/**
+!docs/product-spec.md
+docs/remediation-*.md
+docs/execution-review-*.md
 
 # Local databases and runtime artifacts
 *.db
