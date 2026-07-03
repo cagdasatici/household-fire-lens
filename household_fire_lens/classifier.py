@@ -120,6 +120,40 @@ def apply_user_resolution_migrations(conn: sqlite3.Connection) -> None:
           AND actions_json LIKE '%Consulting%'
         """
     )
+    conn.execute(
+        """
+        UPDATE classification_rules
+        SET enabled = 0
+        WHERE enabled = 1
+          AND name = 'Classify stock-plan March/April proceeds as RSU income'
+          AND actions_json LIKE '%Equity Compensation%'
+          AND actions_json LIKE '%RSU%'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE normalized_transactions
+        SET is_duplicate = 0
+        WHERE is_duplicate = 1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM normalized_transactions other
+              WHERE other.source_fingerprint = normalized_transactions.source_fingerprint
+                AND other.is_duplicate = 0
+                AND other.source_file_id != normalized_transactions.source_file_id
+          )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM transaction_links
+        WHERE link_type = 'duplicate'
+          AND (
+              from_transaction_id IN (SELECT id FROM normalized_transactions WHERE is_duplicate = 0)
+              OR to_transaction_id IN (SELECT id FROM normalized_transactions WHERE is_duplicate = 0)
+          )
+        """
+    )
     rows = conn.execute(
         """
         SELECT id, conditions_json
@@ -342,10 +376,12 @@ def classify_transaction(
             return Annotation("wealth_allocation", "Investments", "RSU Settlement", 0.84, "Wise RSU share-booking outflow")
         if amount < 0 and any(keyword in text for keyword in INVESTMENT_KEYWORDS):
             return Annotation("wealth_allocation", "Investments", "Wise to Broker", 0.9, "Wise transfer to broker")
-        if amount > 0 and native_currency != "EUR" and amount >= 1000:
-            return Annotation("income", "Equity Compensation", "RSU", 0.82, "Large non-EUR Wise inflow treated as RSU proceeds pending vest-schedule check")
-        if amount > 0 and native_currency == "EUR":
-            return Annotation("internal_transfer", "Inter-account Transfers", "Wise", 0.84, "Wise EUR top-up from own account")
+        if is_wise_rsu_inflow(tx):
+            return Annotation("income", "Equity Compensation", "RSU", 0.88, "Wise USD stock-plan proceeds in vest window")
+        if amount > 0:
+            return Annotation("internal_transfer", "Inter-account Transfers", "Wise", 0.84, "Wise top-up from own account")
+        if amount < 0:
+            return Annotation("household_spend", "Other", "Personal Transfer", 0.66, "Wise outbound person-to-person transfer")
 
     if role == "savings":
         if any(keyword in text for keyword in CURRENT_ACCOUNT_TRANSFER_KEYWORDS):
@@ -366,6 +402,9 @@ def classify_transaction(
         if any(keyword in text for keyword in CHILD_BENEFIT_KEYWORDS):
             return Annotation("income", "Benefits", "Child Benefit", 0.94, "Dutch SVB child-benefit payment")
         return Annotation("income", "Benefits", "Government Benefit", 0.88, "Dutch SVB payment")
+
+    if is_direct_rsu_compensation(tx):
+        return Annotation("income", "Equity Compensation", "RSU", 0.72, "Direct USD compensation payout treated as equity compensation")
 
     if any(keyword in text for keyword in BOOKING_REIMBURSEMENT_KEYWORDS) and amount > 0:
         return Annotation("reimbursement_pass_through", "Reimbursements", "Booking.com", 0.93, "Booking.com reimbursement deposit")
@@ -585,6 +624,40 @@ def is_cash_bonus_income(tx: Dict) -> bool:
     return amount > 0 and (has_bonus_keyword(tx) or (tx_date.month == 2 and has_salary_keyword(tx) and amount >= 15000))
 
 
+def is_rsu_window(day: date) -> bool:
+    return day.month in {3, 4} or (day.month == 5 and day.day <= 15)
+
+
+def is_wise_rsu_inflow(tx: Dict) -> bool:
+    amount = float(tx["amount"])
+    currencies = {
+        str(tx.get("native_currency") or "").upper(),
+        str(tx.get("source_currency") or "").upper(),
+        str(tx.get("target_currency") or "").upper(),
+        str(tx.get("currency") or "").upper(),
+    }
+    text = signal_text(tx)
+    return (
+        amount >= 1000
+        and "USD" in currencies
+        and "MONEY ADDED" in text
+        and is_rsu_window(parse_iso_date(tx["transaction_date"]))
+    )
+
+
+def is_direct_rsu_compensation(tx: Dict) -> bool:
+    amount = float(tx["amount"])
+    text = signal_text(tx)
+    currencies = {
+        str(tx.get("native_currency") or "").upper(),
+        str(tx.get("source_currency") or "").upper(),
+        str(tx.get("target_currency") or "").upper(),
+        str(tx.get("currency") or "").upper(),
+    }
+    has_usd_signal = "USD" in currencies or "USD" in text or "OORSPR." in text
+    return amount >= 1000 and amount > 0 and has_usd_signal and "COMPENSATION" in text
+
+
 def detect_salary_ids(transactions: List[Dict]) -> set:
     by_source: Dict[str, List[Dict]] = defaultdict(list)
     for tx in transactions:
@@ -636,35 +709,74 @@ def is_salary_eligible_account(tx: Dict) -> bool:
 
 
 def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float, str, str]]:
-    pairs = []
+    candidates = []
     active = [tx for tx in transactions if not tx["is_duplicate"]]
-    for i, left in enumerate(active):
+    by_amount_day: Dict[Tuple[int, int], List[Dict]] = defaultdict(list)
+    tx_dates: Dict[int, date] = {}
+    for tx in active:
+        amount = float(tx["amount"])
+        if amount == 0:
+            continue
+        tx_date = parse_iso_date(tx["transaction_date"])
+        tx_dates[tx["id"]] = tx_date
+        by_amount_day[(int(round(abs(amount) * 100)), tx_date.toordinal())].append(tx)
+    for left in active:
         left_amount = float(left["amount"])
         if left_amount == 0:
             continue
-        left_date = parse_iso_date(left["transaction_date"])
-        for right in active[i + 1 :]:
-            right_amount = float(right["amount"])
-            if left["account_id"] == right["account_id"]:
-                continue
-            if abs(left_amount + right_amount) > 0.01:
-                continue
-            right_date = parse_iso_date(right["transaction_date"])
-            if abs((left_date - right_date).days) > 3:
-                continue
-            roles = {left["account_role"], right["account_role"]}
-            texts = signal_text(left) + " " + signal_text(right)
-            if "investment" in roles or any(keyword in texts for keyword in INVESTMENT_KEYWORDS):
-                kind = "transfer_pair"
-                explanation = "Matched equal/opposite investment transfer across own accounts"
-            elif roles <= {"checking", "savings", "wise", "unknown"} or any(keyword in texts for keyword in SAVINGS_KEYWORDS):
-                kind = "transfer_pair"
-                explanation = "Matched equal/opposite transfer across own accounts"
-            else:
-                continue
-            pairs.append((left["id"], right["id"], abs(left_amount), kind, explanation))
-            break
+        left_date = tx_dates[left["id"]]
+        amount_key = int(round(abs(left_amount) * 100))
+        for day_offset in range(-3, 4):
+            day_candidates = by_amount_day.get((amount_key, left_date.toordinal() + day_offset), [])
+            for right in day_candidates:
+                if right["id"] <= left["id"]:
+                    continue
+                right_amount = float(right["amount"])
+                if left["account_id"] == right["account_id"]:
+                    continue
+                if left_amount * right_amount >= 0:
+                    continue
+                if abs(left_amount + right_amount) > 0.01:
+                    continue
+                right_date = tx_dates[right["id"]]
+                roles = {left["account_role"], right["account_role"]}
+                texts = signal_text(left) + " " + signal_text(right)
+                if "investment" in roles or any(keyword in texts for keyword in INVESTMENT_KEYWORDS):
+                    kind = "transfer_pair"
+                    explanation = "Matched equal/opposite investment transfer across own accounts"
+                elif roles <= {"checking", "savings", "wise", "unknown"} or any(keyword in texts for keyword in SAVINGS_KEYWORDS):
+                    kind = "transfer_pair"
+                    explanation = "Matched equal/opposite transfer across own accounts"
+                else:
+                    continue
+                candidates.append(
+                    (
+                        abs((left_date - right_date).days),
+                        transfer_pair_priority(left, right),
+                        -abs(left_amount),
+                        left["id"],
+                        right["id"],
+                        abs(left_amount),
+                        kind,
+                        explanation,
+                    )
+                )
+    pairs = []
+    used_ids = set()
+    for _days, _priority, _negative_amount, left_id, right_id, amount, kind, explanation in sorted(candidates):
+        if left_id in used_ids or right_id in used_ids:
+            continue
+        used_ids.add(left_id)
+        used_ids.add(right_id)
+        pairs.append((left_id, right_id, amount, kind, explanation))
     return pairs
+
+
+def transfer_pair_priority(left: Dict, right: Dict) -> int:
+    text = f"{signal_text(left)} {signal_text(right)}"
+    if any(keyword in text for keyword in ("TERUGSTORTING", "FLATEX WITHDRAWAL", "PROCESSED FLATEX WITHDRAWAL")):
+        return 0
+    return 1
 
 
 def detect_card_settlement_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float, str]]:
@@ -1087,6 +1199,7 @@ def sync_observed_income_events(conn: sqlite3.Connection) -> None:
         DELETE FROM expected_income_events
         WHERE note = 'Observed during classification'
            OR note LIKE 'Auto-generated from observed recurring salary cadence%'
+           OR note LIKE 'Auto-generated cash-bonus expectation:%'
            OR note LIKE 'Auto-generated RSU expectation:%'
         """
     )
@@ -1133,6 +1246,7 @@ def sync_observed_income_events(conn: sqlite3.Connection) -> None:
 
 def sync_expected_income_calendar(conn: sqlite3.Connection) -> None:
     sync_expected_salary_events(conn)
+    sync_expected_cash_bonus_events(conn)
     sync_expected_rsu_events(conn)
 
 
@@ -1158,55 +1272,93 @@ def sync_expected_salary_events(conn: sqlite3.Connection) -> None:
         ORDER BY nt.transaction_date
         """
     ).fetchall()
-    salary_by_type: Dict[str, List[sqlite3.Row]] = defaultdict(list)
-    bonus_month_institutions: Dict[str, set] = defaultdict(set)
-    observed_salary_months: Dict[str, set] = defaultdict(set)
+    salary_totals: Dict[str, float] = defaultdict(float)
     for row in rows:
-        institution = row["institution"] or ""
         if row["subcategory"] == "Cash Bonus":
-            bonus_month_institutions[row["month"]].add(institution)
             continue
-        event_type = "salary"
-        if institution == "ing":
-            event_type = "salary_ing"
-        elif institution == "abn":
-            event_type = "salary_abn"
-        salary_by_type[event_type].append(row)
-        observed_salary_months[event_type].add(row["month"])
+        salary_totals[row["month"]] += float(row["amount"])
+    max_month = latest_closed_transaction_month(conn)
+    if not max_month or not salary_totals:
+        return
+    start_month = max(min(salary_totals), "2022-01")
+    observed_amounts = [
+        amount
+        for month, amount in salary_totals.items()
+        if month >= start_month and month[5:7] != "02"
+    ]
+    if len(observed_amounts) < 2:
+        return
+    expected_amount = median(observed_amounts)
+    tolerance = max(750.0, expected_amount * 0.18)
+    for month in iter_months(start_month, max_month):
+        if int(month[:4]) >= 2023 and month[5:7] == "02":
+            continue
+        expected_date = expected_salary_date(int(month[:4]), int(month[5:7]))
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount, status, note
+            ) VALUES (?, 'salary', ?, ?, ?, 'expected', ?)
+            """,
+            (
+                month,
+                expected_date,
+                expected_amount,
+                tolerance,
+                "Auto-generated from observed recurring salary cadence; account-agnostic household total.",
+            ),
+        )
+
+
+def sync_expected_cash_bonus_events(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 7) AS month,
+            nt.transaction_date,
+            nt.amount
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount > 0
+          AND ta.economic_class = 'income'
+          AND ta.category = 'Income'
+          AND ta.subcategory = 'Cash Bonus'
+          AND a.role = 'checking'
+          AND lower(a.institution) IN ('ing', 'abn', 'generic')
+          AND substr(nt.transaction_date, 6, 2) = '02'
+          AND CAST(substr(nt.transaction_date, 1, 4) AS INTEGER) >= 2023
+        ORDER BY nt.transaction_date
+        """
+    ).fetchall()
+    if not rows:
+        return
     max_month = latest_closed_transaction_month(conn)
     if not max_month:
         return
-    for event_type, items in salary_by_type.items():
-        if len(items) < 2:
+    observed_amounts = [float(row["amount"]) for row in rows]
+    expected_amount = median(observed_amounts)
+    tolerance = max(5000.0, expected_amount * 0.25)
+    start_year = max(2023, min(int(row["month"][:4]) for row in rows))
+    end_year = int(max_month[:4])
+    for year in range(start_year, end_year + 1):
+        if max_month < f"{year}-02":
             continue
-        start_month = min(row["month"] for row in items)
-        observed_amounts = [float(row["amount"]) for row in items if str(row["transaction_date"])[5:7] != "02"]
-        if not observed_amounts:
-            observed_amounts = [float(row["amount"]) for row in items]
-        expected_amount = median(observed_amounts)
-        tolerance = max(300.0, expected_amount * 0.15)
-        institution = event_type.split("_", 1)[1] if "_" in event_type else ""
-        for month in iter_months(start_month, max_month):
-            if month in observed_salary_months.get(event_type, set()):
-                continue
-            if month[5:7] == "02" and institution in bonus_month_institutions.get(month, set()):
-                continue
-            expected_date = expected_salary_date(int(month[:4]), int(month[5:7]))
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO expected_income_events (
-                    month, event_type, expected_date, expected_amount, tolerance_amount, status, note
-                ) VALUES (?, ?, ?, ?, ?, 'expected', ?)
-                """,
-                (
-                    month,
-                    event_type,
-                    expected_date,
-                    expected_amount,
-                    tolerance,
-                    "Auto-generated from observed recurring salary cadence; February skipped when bonus covers salary.",
-                ),
-            )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount, status, note
+            ) VALUES (?, 'cash_bonus', ?, ?, ?, 'expected', ?)
+            """,
+            (
+                f"{year}-02",
+                expected_salary_date(year, 2),
+                expected_amount,
+                tolerance,
+                "Auto-generated cash-bonus expectation: February salary+bonus event starts in 2023.",
+            ),
+        )
 
 
 def sync_expected_rsu_events(conn: sqlite3.Connection) -> None:
@@ -1230,7 +1382,7 @@ def sync_expected_rsu_events(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if not bounds or not bounds["max_date"]:
         return
-    start_year = max(2023, int((bounds["min_date"] or bounds["max_date"])[:4]))
+    start_year = max(2022, int((bounds["min_date"] or bounds["max_date"])[:4]))
     end_year = int(bounds["max_date"][:4])
     for year in range(start_year, end_year + 1):
         if bounds["max_date"] < f"{year}-04-30":
@@ -1373,6 +1525,7 @@ def expected_event_materiality(event: Dict) -> float:
 def find_expected_income_observation(conn: sqlite3.Connection, event: Dict) -> Optional[sqlite3.Row]:
     if event["event_type"] == "rsu":
         year = int(event["month"][:4])
+        end_date = f"{year}-12-31" if year == 2022 else f"{year}-05-15"
         return conn.execute(
             """
             SELECT nt.id
@@ -1386,8 +1539,36 @@ def find_expected_income_observation(conn: sqlite3.Connection, event: Dict) -> O
             ORDER BY nt.amount DESC
             LIMIT 1
             """,
-            (f"{year}-03-01", f"{year}-05-15"),
+            (f"{year}-03-01", end_date),
         ).fetchone()
+    if event["event_type"] == "salary":
+        row = conn.execute(
+            """
+            SELECT MAX(nt.id) AS id, SUM(nt.amount) AS total
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND substr(nt.transaction_date, 1, 7) = ?
+              AND nt.amount > 0
+              AND ta.economic_class = 'income'
+              AND ta.category = 'Income'
+              AND ta.subcategory = 'Salary'
+              AND a.role = 'checking'
+              AND lower(a.institution) IN ('ing', 'abn', 'generic')
+            """,
+            (event["month"],),
+        ).fetchone()
+        total = float(row["total"] or 0) if row else 0.0
+        if total <= 0:
+            return None
+        expected_amount = event.get("expected_amount")
+        if expected_amount is not None:
+            tolerance = float(event.get("tolerance_amount") or 0)
+            tolerance = tolerance or max(1.0, abs(float(expected_amount)) * 0.02)
+            if total + tolerance < float(expected_amount):
+                return None
+        return row
     expected_amount = event.get("expected_amount")
     tolerance = float(event.get("tolerance_amount") or 0)
     params: List = [event["month"], event["event_type"]]

@@ -102,7 +102,7 @@ def insert_parsed_transactions(
     imported = 0
     duplicates = 0
     for tx in parsed:
-        raw_hash = row_hash(tx.raw)
+        raw_hash = row_hash({"row_number": tx.row_number, "raw": tx.raw})
         raw_cursor = conn.execute(
             """
             INSERT OR IGNORE INTO raw_transactions (source_file_id, row_number, raw_json, row_hash)
@@ -148,10 +148,10 @@ def insert_parsed_transactions(
         duplicate_row = conn.execute(
             """
             SELECT id FROM normalized_transactions
-            WHERE source_fingerprint = ? AND is_duplicate = 0
+            WHERE source_fingerprint = ? AND is_duplicate = 0 AND source_file_id != ?
             LIMIT 1
             """,
-            (source_fingerprint,),
+            (source_fingerprint, source_file_id),
         ).fetchone()
         is_duplicate = 1 if duplicate_row else 0
         if is_duplicate:

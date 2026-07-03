@@ -213,6 +213,59 @@ class DomainTests(unittest.TestCase):
         snapshot = fire_snapshot(self.conn)
         self.assertEqual(len(snapshot["months"]), 3)
 
+    def test_repeated_rows_inside_one_source_file_are_not_duplicates(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-15,Broker Cash,Processed Flatex Withdrawal,flatexDEGIRO,-10000.00,EUR
+2026-04-15,Broker Cash,Processed Flatex Withdrawal,flatexDEGIRO,-10000.00,EUR
+"""
+        result = import_csv(
+            self.conn,
+            "degiro-repeated-withdrawals.csv",
+            csv_text.encode("utf-8"),
+            institution="degiro",
+            account_role="investment",
+        )
+        self.assertEqual(result["duplicates"], 0)
+        duplicate_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM normalized_transactions WHERE is_duplicate = 1"
+        ).fetchone()["count"]
+        self.assertEqual(duplicate_count, 0)
+
+    def test_transfer_pair_detector_uses_each_side_once(self):
+        bank_csv = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-15,ING Main,DEGIRO terugstorting,flatexDEGIRO,10000.00,EUR
+2026-04-15,ING Main,DEGIRO terugstorting,flatexDEGIRO,10000.00,EUR
+"""
+        broker_csv = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-15,Broker Cash,Processed Flatex Withdrawal,flatexDEGIRO,-10000.00,EUR
+2026-04-15,Broker Cash,Processed Flatex Withdrawal,flatexDEGIRO,-10000.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "bank-degiro-repeated-inflows.csv",
+            bank_csv.encode("utf-8"),
+            institution="ing",
+            account_role="checking",
+        )
+        import_csv(
+            self.conn,
+            "broker-degiro-repeated-outflows.csv",
+            broker_csv.encode("utf-8"),
+            institution="degiro",
+            account_role="investment",
+        )
+        classify_all(self.conn)
+        links = self.conn.execute(
+            """
+            SELECT from_transaction_id, to_transaction_id
+            FROM transaction_links
+            WHERE link_type = 'transfer_pair'
+            """
+        ).fetchall()
+        used_ids = {row["from_transaction_id"] for row in links} | {row["to_transaction_id"] for row in links}
+        self.assertEqual(len(links), 2)
+        self.assertEqual(len(used_ids), 4)
+
     def test_review_rule_can_be_created_and_reused(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-04-01,Main,Mystery merchant,Mystery Shop,-250.00,EUR
@@ -949,6 +1002,36 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows[1]["economic_class"], "wealth_allocation")
         self.assertEqual(rows[1]["subcategory"], "Wise to Broker")
 
+    def test_wise_usd_money_added_is_rsu_only_in_vest_window(self):
+        csv_text = """ID,Status,Direction,Created on,Finished on,Source fee amount,Source fee currency,Target fee amount,Target fee currency,Source name,Source amount (after fees),Source currency,Target name,Target amount (after fees),Target currency,Exchange rate,Reference,Batch,Created by,Category,Note
+TRANSFER-RSU,COMPLETED,IN,2026-03-06 10:00:00,2026-03-06 10:01:00,0,USD,,,Equity Plan,92524.53,USD,Household User,80031.60,EUR,0.865,vest,batch,user,Money added,
+TRANSFER-TOPUP,COMPLETED,IN,2024-11-19 10:00:00,2024-11-19 10:01:00,0,USD,,,Own USD Balance,10008.66,USD,Household User,9461.77,EUR,0.945,rebalance,batch,user,Money added,
+"""
+        import_csv(
+            self.conn,
+            "wise-rsu-window.csv",
+            csv_text.encode("utf-8"),
+            institution="wise",
+            account_role="wise",
+            account_hint="Wise",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["transaction_date"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.transaction_date, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["2026-03-06"]["economic_class"], "income")
+        self.assertEqual(rows["2026-03-06"]["category"], "Equity Compensation")
+        self.assertEqual(rows["2026-03-06"]["subcategory"], "RSU")
+        self.assertEqual(rows["2024-11-19"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["2024-11-19"]["subcategory"], "Wise")
+
     def test_wise_rsu_share_booking_outflow_is_wealth_allocation(self):
         csv_text = """ID,Status,Direction,Created on,Finished on,Source fee amount,Source fee currency,Target fee amount,Target fee currency,Source name,Source amount (after fees),Source currency,Target name,Target amount (after fees),Target currency,Exchange rate,Reference,Batch,Created by,Category,Note
 TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Household User,14755.95,EUR,Household User,14755.95,EUR,1.0,Employer equity - 6 shares,batch,user,General,
@@ -1187,7 +1270,7 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         ).fetchone()["count"]
         self.assertEqual(wealth_count, 2)
 
-    def test_rsu_income_rule_can_override_inbound_investment_counterparty_by_month(self):
+    def test_bad_stock_plan_income_rule_is_disabled_for_broker_cash_account(self):
         self.conn.execute(
             """
             INSERT INTO classification_rules (
@@ -1205,7 +1288,7 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
             INSERT INTO classification_rules (
                 name, priority, conditions_json, actions_json, confidence, created_by, enabled
             ) VALUES (
-                'RSU vest proceeds', 10,
+                'Classify stock-plan March/April proceeds as RSU income', 10,
                 '{"counterparty_account_hash": "stock-plan", "direction": "inflow", "months": [3, 4], "min_abs_amount": 1000}',
                 '{"economic_class": "income", "category": "Equity Compensation", "subcategory": "RSU"}',
                 0.98, 'user', 1
@@ -1241,9 +1324,9 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
                 """
             ).fetchall()
         }
-        self.assertEqual(rows["Stock plan vest proceeds"]["economic_class"], "income")
-        self.assertEqual(rows["Stock plan vest proceeds"]["category"], "Equity Compensation")
-        self.assertEqual(rows["Stock plan vest proceeds"]["subcategory"], "RSU")
+        self.assertEqual(rows["Stock plan vest proceeds"]["economic_class"], "wealth_allocation")
+        self.assertEqual(rows["Stock plan vest proceeds"]["category"], "Investments")
+        self.assertEqual(rows["Stock plan vest proceeds"]["subcategory"], "")
         self.assertEqual(rows["Investment withdrawal"]["economic_class"], "wealth_allocation")
 
     def test_investment_review_promotes_unknown_dedicated_account(self):
@@ -1355,6 +1438,25 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertLess(annotation["confidence"], 0.7)
         self.assertIsNotNone(review)
 
+    def test_direct_usd_compensation_is_equity_compensation(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2022-12-20,Main,COMPENSATION OORSPR. USD 5905,Equity Plan,5649.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-usd-compensation.csv",
+            csv_text.encode("utf-8"),
+            institution="ing",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        annotation = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations"
+        ).fetchone()
+        self.assertEqual(annotation["economic_class"], "income")
+        self.assertEqual(annotation["category"], "Equity Compensation")
+        self.assertEqual(annotation["subcategory"], "RSU")
+
     def test_missing_expected_income_event_raises_review_item(self):
         self.conn.execute(
             """
@@ -1410,6 +1512,65 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
             """
         ).fetchone()["count"]
         self.assertEqual(review_count, 0)
+
+    def test_salary_expectations_are_household_level_not_per_account(self):
+        ing_csv = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-26,ING Main,Wage/Salary 202601,Booking.com Payroll,3000.00,EUR
+2026-03-25,ING Main,Wage/Salary 202603,Booking.com Payroll,3000.00,EUR
+2026-05-25,ING Main,Wage/Salary 202605,Booking.com Payroll,3000.00,EUR
+"""
+        abn_csv = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-26,ABN Fixed,Wage/Salary 202601,Booking.com Payroll,5000.00,EUR
+2026-03-25,ABN Fixed,Wage/Salary 202603,Booking.com Payroll,5200.00,EUR
+2026-04-25,ABN Fixed,Wage/Salary 202604,Booking.com Payroll,8210.64,EUR
+2026-05-25,ABN Fixed,Wage/Salary 202605,Booking.com Payroll,5000.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "salary-ing-split.csv",
+            ing_csv.encode("utf-8"),
+            institution="ing",
+            account_role="checking",
+        )
+        import_csv(
+            self.conn,
+            "salary-abn-full-april.csv",
+            abn_csv.encode("utf-8"),
+            institution="abn",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        april = self.conn.execute(
+            """
+            SELECT status, observed_transaction_id
+            FROM expected_income_events
+            WHERE month = '2026-04'
+              AND event_type = 'salary'
+            """
+        ).fetchone()
+        per_account_expected = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM expected_income_events
+            WHERE status = 'expected'
+              AND event_type IN ('salary_ing', 'salary_abn')
+            """
+        ).fetchone()["count"]
+        april_reviews = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM review_items ri
+            JOIN expected_income_events eie ON eie.id = ri.expected_event_id
+            WHERE ri.status = 'open'
+              AND eie.month = '2026-04'
+              AND eie.event_type LIKE 'salary%'
+            """
+        ).fetchone()["count"]
+        self.assertIsNotNone(april)
+        self.assertEqual(april["status"], "observed")
+        self.assertIsNotNone(april["observed_transaction_id"])
+        self.assertEqual(per_account_expected, 0)
+        self.assertEqual(april_reviews, 0)
 
     def test_digest_tiers_are_persisted_for_auto_classifications(self):
         self.import_and_classify()
