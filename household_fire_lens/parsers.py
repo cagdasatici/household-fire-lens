@@ -9,7 +9,8 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-PARSER_VERSION = "2026.07.03.1"
+PARSER_VERSION = "2026.07.03.3"
+ABN_PDF_CUTOFF_DATE = "2025-01-03"
 IBAN_PATTERN = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
 IBAN_TEXT_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?:[\s-]?[A-Z0-9]){10,30}\b")
 PAYMENT_PROCESSOR_PATTERNS = (
@@ -118,6 +119,20 @@ class ParsedTransaction:
     target_amount: Optional[float] = None
     target_currency: Optional[str] = None
     exchange_rate: Optional[float] = None
+
+
+@dataclass
+class ParsedBalanceAnchor:
+    institution: str
+    account_hint: str
+    account_identifier: str
+    role: str
+    observation_date: str
+    balance_type: str
+    amount: float
+    currency: str = "EUR"
+    confidence: float = 0.95
+    note: str = ""
 
 
 class ParseError(ValueError):
@@ -345,6 +360,15 @@ def parse_amex_date(value: str) -> str:
     raise ParseError(f"Could not parse Amex date: {value}")
 
 
+def parse_month_day(value: str, statement_date: str) -> str:
+    day, month = [int(part) for part in value.split("-")]
+    statement = datetime.strptime(statement_date, "%Y-%m-%d").date()
+    year = statement.year
+    if month > statement.month + 6:
+        year -= 1
+    return datetime(year, month, day).date().isoformat()
+
+
 def parse_amount(value: str, debit_credit: str = "") -> float:
     raw = (value or "").strip()
     if not raw:
@@ -383,6 +407,11 @@ def parse_number(value: str) -> float:
     except ValueError as exc:
         raise ParseError(f"Could not parse number: {value}") from exc
     return -amount if negative else amount
+
+
+def format_pdf_amount(value: float) -> str:
+    formatted = f"{abs(value):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"-{formatted}" if value < 0 else formatted
 
 
 def optional_number(value: str) -> Optional[float]:
@@ -793,3 +822,314 @@ def parse_generic(row: Dict[str, str], row_number: int, account_hint: str, insti
         description=description or counterparty,
         reference=first_value(row, "reference", "referentie", "id"),
     )
+
+
+def parse_ing_credit_card_pdf_text(filename: str, text: str, account_hint: str = "") -> List[ParsedTransaction]:
+    period_match = re.search(r"Periode\s+(\d{2}-\d{2}-\d{4})\s+t/m\s+(\d{2}-\d{2}-\d{4})", text)
+    period_start = parse_date(period_match.group(1)) if period_match else ""
+    period_end = parse_date(period_match.group(2)) if period_match else ""
+    agreement_match = re.search(r"Overeenkomstnummer\s+([\d\s]{8,})", text)
+    agreement = re.sub(r"\s+", "", agreement_match.group(1)) if agreement_match else "ING credit card"
+    settlement_match = re.search(r"Op\s+(\d{2}-\d{2}-\d{4})\s+schrijven wij\s+([\d.]+,\d{2})\s+euro af", text)
+    settlement_date = parse_date(settlement_match.group(1)) if settlement_match else ""
+    settlement_amount = parse_number(settlement_match.group(2)) if settlement_match else None
+    line_pattern = re.compile(
+        r"^\s*(\d{2}-\d{2}-\d{4})\s+(.+?)\s{2,}(Betaling|Ontvangst|Incasso)\s+([+\-]?\s*(?:\d{1,3}\.)*\d+,\d{2})\s*$"
+    )
+    parsed: List[ParsedTransaction] = []
+    current: Optional[Dict[str, object]] = None
+
+    def finish_current() -> None:
+        if not current:
+            return
+        details = " ".join(str(part).strip() for part in current.get("details", []) if str(part).strip())
+        description = " ".join(part for part in [str(current["merchant"]), details] if part)
+        amount = float(current["amount"])
+        raw = {
+            "filename": filename,
+            "period_start": period_start,
+            "period_end": period_end,
+            "statement_settlement_date": settlement_date,
+            "statement_settlement_amount": format_pdf_amount(settlement_amount) if settlement_amount is not None else "",
+            "booking_date": str(current["date"]),
+            "merchant": str(current["merchant"]),
+            "type": str(current["type"]),
+            "amount": format_pdf_amount(amount),
+            "details": details,
+        }
+        parsed.append(
+            ParsedTransaction(
+                row_number=int(current["row_number"]),
+                raw=raw,
+                institution="ing_credit_card",
+                account_hint=account_hint or "ING Credit Card",
+                account_identifier=agreement,
+                transaction_date=str(current["date"]),
+                booking_date=str(current["date"]),
+                amount=amount,
+                currency="EUR",
+                counterparty_name=str(current["merchant"]),
+                counterparty_account="",
+                description=description,
+                reference=f"{filename}:{current['row_number']}",
+            )
+        )
+
+    for row_number, line in enumerate(text.splitlines(), start=1):
+        match = line_pattern.match(line.rstrip())
+        if match:
+            finish_current()
+            tx_type = match.group(3)
+            raw_amount = match.group(4)
+            amount = parse_amount(raw_amount, "debit" if tx_type == "Betaling" else "credit")
+            current = {
+                "row_number": row_number,
+                "date": parse_date(match.group(1)),
+                "merchant": re.sub(r"\s+", " ", match.group(2)).strip(),
+                "type": tx_type,
+                "amount": amount,
+                "details": [],
+            }
+            continue
+        if current:
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith("pagina ")
+                or stripped.startswith("Pagina ")
+                or stripped.startswith("Afschrift Creditcard")
+                or stripped.startswith("Geboekt op")
+                or stripped.startswith("Overeenkomstnummer")
+                or stripped.startswith("Periode")
+            ):
+                continue
+            current["details"].append(stripped)
+    finish_current()
+    return parsed
+
+
+def parse_abn_statement_pdf_text(
+    filename: str,
+    text: str,
+    account_hint: str = "",
+    cutoff_date: str = ABN_PDF_CUTOFF_DATE,
+) -> Tuple[List[ParsedTransaction], List[ParsedBalanceAnchor]]:
+    dates = re.findall(r"\b\d{2}-\d{2}-\d{4}\b", text)
+    if not dates:
+        raise ParseError("Missing ABN statement date")
+    statement_date = parse_date(dates[0])
+    account_match = re.search(r"\b(NL\d{2}\s?ABNA(?:\s?\d){10})\b", text)
+    account_identifier = re.sub(r"\s+", "", account_match.group(1)) if account_match else account_hint or "ABN PDF account"
+    credit_header = 95
+    for line in text.splitlines():
+        if "Bedrag af" in line and "Bedrag bij" in line:
+            credit_header = line.index("Bedrag bij")
+            break
+
+    anchors: List[ParsedBalanceAnchor] = []
+    balance_match = re.search(
+        r"Vorig saldo\s+Nieuw saldo.*?\n\s*([\d.]+,\d{2})\s+\+/CREDIT\s+([\d.]+,\d{2})\s+\+/CREDIT",
+        text,
+        re.S,
+    )
+    if balance_match:
+        anchors.append(
+            ParsedBalanceAnchor(
+                institution="abn",
+                account_hint=account_hint or "ABN Checking",
+                account_identifier=account_identifier,
+                role="checking",
+                observation_date=statement_date,
+                balance_type="opening_pdf_statement",
+                amount=parse_number(balance_match.group(1)),
+                confidence=0.92,
+                note=f"Opening balance captured from {filename}",
+            )
+        )
+        anchors.append(
+            ParsedBalanceAnchor(
+                institution="abn",
+                account_hint=account_hint or "ABN Checking",
+                account_identifier=account_identifier,
+                role="checking",
+                observation_date=statement_date,
+                balance_type="closing_pdf_statement",
+                amount=parse_number(balance_match.group(2)),
+                confidence=0.96,
+                note=f"Closing balance captured from {filename}",
+            )
+        )
+
+    line_pattern = re.compile(r"^\s*(\d{2}-\d{2})\s+(.+?)\s{2,}([+\-]?(?:\d{1,3}\.)*\d+,\d{2})\s*$")
+    parsed: List[ParsedTransaction] = []
+    current: Optional[Dict[str, object]] = None
+
+    def finish_current() -> None:
+        if not current:
+            return
+        tx_date = str(current["date"])
+        if tx_date >= cutoff_date:
+            return
+        details = " ".join(str(part).strip() for part in current.get("details", []) if str(part).strip())
+        description = " ".join(part for part in [str(current["description"]), details] if part)
+        amount = float(current["amount"])
+        counterparty_account = extract_iban(description, exclude=(account_identifier,))
+        counterparty = normalize_merchant(description) or str(current["description"])
+        parsed.append(
+            ParsedTransaction(
+                row_number=int(current["row_number"]),
+                raw={
+                    "filename": filename,
+                    "statement_date": statement_date,
+                    "booking_date": tx_date,
+                    "description": str(current["description"]),
+                    "details": details,
+                    "amount": format_pdf_amount(amount),
+                    "amount_column": str(current["amount_column"]),
+                },
+                institution="abn",
+                account_hint=account_hint or "ABN Checking",
+                account_identifier=account_identifier,
+                transaction_date=tx_date,
+                booking_date=tx_date,
+                amount=amount,
+                currency="EUR",
+                counterparty_name=counterparty,
+                counterparty_account=counterparty_account,
+                description=description,
+                reference=f"{filename}:{current['row_number']}",
+            )
+        )
+
+    for row_number, line in enumerate(text.splitlines(), start=1):
+        match = line_pattern.match(line.rstrip())
+        if match:
+            finish_current()
+            amount_start = match.start(3)
+            amount = parse_number(match.group(3))
+            is_credit = amount_start >= max(0, credit_header - 5)
+            current = {
+                "row_number": row_number,
+                "date": parse_month_day(match.group(1), statement_date),
+                "description": re.sub(r"\s+", " ", match.group(2)).strip(),
+                "amount": abs(amount) if is_credit else -abs(amount),
+                "amount_column": "credit" if is_credit else "debit",
+                "details": [],
+            }
+            continue
+        if current:
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith("Rekeningafschrift")
+                or stripped.startswith("Soort rekening")
+                or stripped.startswith("PRIVEREKENING")
+                or stripped.startswith("Boekdatum")
+                or stripped.startswith("(Rentedatum)")
+                or stripped.startswith("ABN AMRO Bank N.V.")
+                or stripped.startswith("K.v.K")
+                or stripped.startswith("BTW nr.")
+                or stripped.startswith("Pagina")
+            ):
+                continue
+            current["details"].append(stripped)
+    finish_current()
+    return parsed, anchors
+
+
+def parse_abn_annual_overview_pdf_text(filename: str, text: str, account_hint: str = "") -> List[ParsedBalanceAnchor]:
+    year_match = re.search(r"Financieel\s+Jaaroverzicht\s+(20\d{2})\b", text, re.I)
+    if not year_match:
+        raise ParseError("Missing ABN annual overview year")
+    year = int(year_match.group(1))
+    anchors: List[ParsedBalanceAnchor] = []
+    account_match = re.search(
+        r"\b(NL\d{2}\s?ABNA(?:\s?\d){10})\b[^\n]*?([\d.]+,\d{2})\s+([\d.]+,\d{2})",
+        text,
+    )
+    if not account_match:
+        account_match = re.search(
+            r"\b(NL\d{2}\s?ABNA(?:\s?\d){10})\b[^\n]*\n\s*([\d.]+,\d{2})\s+([\d.]+,\d{2})",
+            text,
+        )
+    if account_match:
+        account_identifier = re.sub(r"\s+", "", account_match.group(1))
+        anchors.extend(
+            [
+                ParsedBalanceAnchor(
+                    institution="abn",
+                    account_hint=account_hint or "ABN Checking",
+                    account_identifier=account_identifier,
+                    role="checking",
+                    observation_date=f"{year - 1}-12-31",
+                    balance_type="year_end",
+                    amount=parse_number(account_match.group(2)),
+                    confidence=0.96,
+                    note=f"ABN annual overview {year}: prior year-end checking balance",
+                ),
+                ParsedBalanceAnchor(
+                    institution="abn",
+                    account_hint=account_hint or "ABN Checking",
+                    account_identifier=account_identifier,
+                    role="checking",
+                    observation_date=f"{year}-12-31",
+                    balance_type="year_end",
+                    amount=parse_number(account_match.group(3)),
+                    confidence=0.98,
+                    note=f"ABN annual overview {year}: year-end checking balance",
+                ),
+            ]
+        )
+
+    mortgage_number_match = re.search(r"Hypotheeknummer\s+([\d.]+)", text)
+    mortgage_number = mortgage_number_match.group(1) if mortgage_number_match else "ABN mortgage"
+    for line in text.splitlines():
+        if "Leningdeelnr:" not in line:
+            continue
+        loan_match = re.search(r"Leningdeelnr:\s*(\d+)", line)
+        amounts = re.findall(r"-?[\d.]+,\d{2}", line)
+        if not loan_match or len(amounts) < 2:
+            continue
+        loan_part = loan_match.group(1)
+        account_identifier = f"{mortgage_number}:{loan_part}"
+        anchors.extend(
+            [
+                ParsedBalanceAnchor(
+                    institution="abn",
+                    account_hint=f"ABN Mortgage {loan_part}",
+                    account_identifier=account_identifier,
+                    role="mortgage",
+                    observation_date=f"{year - 1}-12-31",
+                    balance_type="year_end",
+                    amount=parse_number(amounts[0]),
+                    confidence=0.96,
+                    note=f"ABN annual overview {year}: prior year-end mortgage balance",
+                ),
+                ParsedBalanceAnchor(
+                    institution="abn",
+                    account_hint=f"ABN Mortgage {loan_part}",
+                    account_identifier=account_identifier,
+                    role="mortgage",
+                    observation_date=f"{year}-12-31",
+                    balance_type="year_end",
+                    amount=parse_number(amounts[1]),
+                    confidence=0.98,
+                    note=f"ABN annual overview {year}: year-end mortgage balance",
+                ),
+            ]
+        )
+        if len(amounts) >= 3:
+            anchors.append(
+                ParsedBalanceAnchor(
+                    institution="abn",
+                    account_hint=f"ABN Mortgage {loan_part}",
+                    account_identifier=account_identifier,
+                    role="mortgage",
+                    observation_date=f"{year}-12-31",
+                    balance_type="paid_interest",
+                    amount=parse_number(amounts[2]),
+                    confidence=0.9,
+                    note=f"ABN annual overview {year}: paid interest/costs for mortgage part {loan_part}",
+                )
+            )
+    return anchors

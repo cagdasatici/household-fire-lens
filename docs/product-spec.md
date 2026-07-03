@@ -1,6 +1,6 @@
 # Household FIRE Lens Product Spec
 
-Household FIRE Lens is a local-first dashboard for household economics and FIRE planning. It imports yearly bank and investment CSVs, preserves raw rows, normalizes transactions, classifies their economic meaning, and produces explainable monthly burn, savings, investment, and data-health views.
+Household FIRE Lens is a local-first dashboard for household economics and FIRE planning. It imports yearly bank, card, and investment exports, preserves raw rows, normalizes transactions, classifies their economic meaning, and produces explainable monthly burn, savings, investment, balance, and data-health views.
 
 ## Priorities
 
@@ -38,12 +38,12 @@ The product optimizes for sustainable cost-of-living truth, not just pretty expe
 ## MVP Scope
 
 - Local web app with SQLite.
-- CSV import for common ING, ABN AMRO, IBKR, DeGiro, and generic exports.
+- CSV/TAB/PDF import for common ING, ABN AMRO, ING credit-card, Amex, IBKR, DeGiro, Wise, and generic exports.
 - Account roles for checking, savings, investment, mortgage, and unknown accounts.
 - Rule-based classification with confidence and explanations.
-- Salary detection using recurring payer, date window, and amount similarity.
+- Salary detection using recurring payer/source account, date window, amount similarity, February cash-bonus handling, and missing-income expectations.
 - Booking.com reimbursement clearing against unknown/card spend at monthly level.
-- Internal transfer, investment transfer, mortgage, credit-card settlement, and refund handling.
+- Internal transfer, investment transfer, mortgage, credit-card settlement/detail pairing, RSU, and refund handling.
 - Review queue that creates reusable rules.
 - FIRE Snapshot, Optimization, Monthly Flow, Spending, Review, Data Health, and Imports views.
 - Recurring merchant detection, controllability-ranked optimization queue, trend alerts, and approval-based amortization rules.
@@ -56,7 +56,9 @@ The product optimizes for sustainable cost-of-living truth, not just pretty expe
 4. Dashboard MVP.
 5. Amortization and optimization insights.
 6. Investment and mortgage refinement.
-7. Optional credit card statement import.
+7. Credit-card statement import and settlement pairing.
+8. Balance sheet from statement anchors and investment account observations.
+9. Zero-toil monthly close loop.
 
 ## Build Rule
 

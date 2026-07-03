@@ -27,16 +27,18 @@ ECONOMIC_CLASSES = {
 
 MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
     (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK", "VOMAR", "DEKAMARKT", "HOOGVLIET"), "Groceries", ""),
-    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA"), "Eating Out", ""),
-    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE"), "Holiday", ""),
-    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE"), "Transportation", ""),
+    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA", "TROUBADOUR"), "Eating Out", ""),
+    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE", "TURKISH AIRLINES", "LANDAL"), "Holiday", ""),
+    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE", "AUTO BEDRIJF", "AUTOBEDR", "FIETSVOORDEEL", "YELLOWBRICK"), "Transportation", ""),
     (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION"), "Subscriptions", ""),
-    (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO"), "Housing", "Utilities"),
-    (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN "), "Housing", "Insurance"),
-    (("MEUBEL", "HENDERS EN HAZEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT"), "Home and Furniture", ""),
-    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER"), "Health", ""),
-    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION"), "Shopping", ""),
-    (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP"), "Taxes and Government", ""),
+    (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO", "ETECK", "POWERPEERS", "VANDEBRON", "FRANK ENERGIE"), "Housing", "Utilities"),
+    (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN ", "NATIONALE NED", "TAF BV", "RISK VERZEKERINGEN"), "Housing", "Insurance"),
+    (("MEUBEL", "HENDERS EN HAZEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT", "RUITER DAKKAPELLEN", "SOLAR TOTAAL", "STUKADOOR", "VUGTS ZONWERING", "MOOI MAKELAARDIJ"), "Home and Furniture", "Home Improvement"),
+    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER", "SPORTCITY", "HEALTH CLUB", "AMSTELHOF SPORT"), "Health", ""),
+    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION", "UNIQLO", "LIMANGO", "WEHKAMP", "WE FASHION"), "Shopping", ""),
+    (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP", "PUBLIEKSZAKEN"), "Taxes and Government", ""),
+    (("KINDERRIJK", "CODERMINDS", "MW IS SMITS", "BCML ENTERPRISE", "I TURN", "SQUALA", "SQULA", "DANCE WAREHOUSE"), "Education", "Kids Activities"),
+    (("HAPPY VALLEY", "DIERENPENSION"), "Pet Care", ""),
 ]
 
 
@@ -54,11 +56,12 @@ INVESTMENT_KEYWORDS = (
     "BUX",
     "MEESMAN",
     "BRAND NEW DAY",
+    "BITVAVO",
 )
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
-CREDIT_CARD_PAYMENT_KEYWORDS = ("HARTELIJK BEDANKT VOOR UW BETALING", "THANK YOU FOR YOUR PAYMENT", "BETALING", "PAYMENT RECEIVED")
+CREDIT_CARD_PAYMENT_KEYWORDS = ("HARTELIJK BEDANKT VOOR UW BETALING", "THANK YOU FOR YOUR PAYMENT", "BETALING", "PAYMENT RECEIVED", "AFLOSSING")
 SALARY_KEYWORDS = ("SALARY", "SALARIS", "PAYROLL", "LOON", "WAGE")
 BONUS_KEYWORDS = ("BONUS", "CASH BONUS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
@@ -70,8 +73,9 @@ SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
 CURRENT_ACCOUNT_TRANSFER_KEYWORDS = ("TRANSFER FROM CURRENT ACCOUNT", "TRANSFER TO CURRENT ACCOUNT")
 SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
 CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
-CASH_WITHDRAWAL_KEYWORDS = ("GELDMAAT", "ATM", "CASH WITHDRAWAL", "CONTANTOPNAME", "GELDAUTOMAAT")
-CARD_TERMINAL_PROCESSOR_KEYWORDS = ("ZETTLE", "SUMUP", "PAY.NL", "STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE", "RIVERTY")
+CASH_WITHDRAWAL_KEYWORDS = ("GELDMAAT", "ATM", "CASH WITHDRAWAL", "CASH MACHINE", "CONTANTOPNAME", "GELDAUTOMAAT", "ING WITHDRAWAL", "GEA NR")
+CASH_DEPOSIT_KEYWORDS = ("ING DEPOSIT", "CASH DEPOSIT", "GELDSTORTING")
+CARD_TERMINAL_PROCESSOR_KEYWORDS = ("ZETTLE", "SUMUP", "PAY.NL", "STICHTING MOLLIE PAYMENTS", "MOLLIE PAYMENTS", " VIA MOLLIE", "RIVERTY", "BUCKAROO", "BUC KAROO")
 PAYMENT_REQUEST_KEYWORDS = ("TIKKIE", "BETAALVERZOEK", "PAYMENT REQUEST", "BETAALVERZOEKJE")
 BANK_TRANSFER_KEYWORDS = ("SEPA OVERBOEKING", "SEPA", "OVERBOEKING", "OVERSCHRIJVING", "BANK TRANSFER")
 RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement_pass_through", "ignore_noise"}
@@ -105,13 +109,46 @@ class RecurringDebitGroup:
     materiality: float
 
 
+def apply_user_resolution_migrations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE classification_rules
+        SET enabled = 0
+        WHERE enabled = 1
+          AND created_by = 'agent'
+          AND name = 'Classify HSBC BANK PLC as Income'
+          AND actions_json LIKE '%Consulting%'
+        """
+    )
+    rows = conn.execute(
+        """
+        SELECT id, conditions_json
+        FROM classification_rules
+        WHERE enabled = 1
+          AND name = 'Classify stock-plan March/April proceeds as RSU income'
+          AND conditions_json LIKE '%"months"%'
+        """
+    ).fetchall()
+    for row in rows:
+        conditions = json_loads(row["conditions_json"], {})
+        if "months" not in conditions:
+            continue
+        conditions.pop("months", None)
+        conn.execute(
+            "UPDATE classification_rules SET conditions_json = ? WHERE id = ?",
+            (json_dumps(conditions), row["id"]),
+        )
+
+
 def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
+    apply_user_resolution_migrations(conn)
     conn.execute("DELETE FROM transaction_annotations")
     conn.execute("DELETE FROM transaction_links WHERE link_type != 'duplicate'")
     conn.execute("DELETE FROM review_items WHERE status = 'open'")
     transactions = load_transactions(conn)
     salary_ids = detect_salary_ids(transactions)
     transfer_pairs = detect_transfer_pairs(transactions)
+    card_settlement_pairs = detect_card_settlement_pairs(transactions)
     refund_pairs = detect_refund_pairs(transactions)
     recurring_debit_groups = detect_recurring_direct_debits(transactions)
 
@@ -126,6 +163,19 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             ) VALUES (?, ?, ?, ?, 0.96, ?)
             """,
             (kind, left_id, right_id, amount, explanation),
+        )
+
+    linked_card_settlement_ids = set()
+    for bank_id, card_id, amount, explanation in card_settlement_pairs:
+        linked_card_settlement_ids.add(bank_id)
+        linked_card_settlement_ids.add(card_id)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO transaction_links (
+                link_type, from_transaction_id, to_transaction_id, amount, confidence, explanation
+            ) VALUES ('card_settlement_pair', ?, ?, ?, 0.97, ?)
+            """,
+            (bank_id, card_id, amount, explanation),
         )
 
     refund_category_by_id: Dict[int, Tuple[str, str]] = {}
@@ -148,6 +198,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             tx,
             salary_ids=salary_ids,
             linked_transfer_ids=linked_transfer_ids,
+            linked_card_settlement_ids=linked_card_settlement_ids,
             refund_category_by_id=refund_category_by_id,
             recurring_debit_groups=recurring_debit_groups,
             user_rules=user_rules,
@@ -178,6 +229,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
     link_one_off_inflows(conn)
     create_review_items(conn)
     sync_observed_income_events(conn)
+    sync_expected_income_calendar(conn)
     create_expected_income_reviews(conn)
     conn.commit()
     return dict(counts)
@@ -235,6 +287,7 @@ def classify_transaction(
     tx: Dict,
     salary_ids: Iterable[int],
     linked_transfer_ids: Iterable[int],
+    linked_card_settlement_ids: Iterable[int],
     refund_category_by_id: Dict[int, Tuple[str, str]],
     recurring_debit_groups: Dict[int, RecurringDebitGroup],
     user_rules: List[Dict],
@@ -248,6 +301,7 @@ def classify_transaction(
     native_currency = (tx.get("native_currency") or tx.get("currency") or "EUR").upper()
     salary_set = set(salary_ids)
     transfer_set = set(linked_transfer_ids)
+    card_settlement_set = set(linked_card_settlement_ids)
 
     if tx["is_duplicate"]:
         return Annotation("ignore_noise", "Duplicate", "", 1.0, "Duplicate import fingerprint", review_status="auto")
@@ -269,10 +323,19 @@ def classify_transaction(
             return Annotation("income", "Income", "Cash Bonus", 0.94, "February payroll bonus pattern")
         return Annotation("income", "Income", "Salary", 0.94, "Recurring salary pattern: payer/date window/amount similarity")
 
+    if tx["id"] in card_settlement_set:
+        return Annotation("internal_transfer", "Card Settlement", "", 0.97, "Matched bank/card settlement pair")
+
     if role == "credit_card":
         if amount > 0 and any(keyword in text for keyword in CREDIT_CARD_PAYMENT_KEYWORDS):
-            return Annotation("internal_transfer", "Card Settlement", "Amex", 0.86, "Credit-card payment credit imported from card statement")
-        return Annotation("ignore_noise", "Credit Card Detail", "Pending Settlement Pairing", 0.9, "Card detail imported; R5 settlement pairing will activate spend lines")
+            return Annotation("internal_transfer", "Card Settlement", "", 0.9, "Credit-card payment credit imported from card statement")
+        if amount > 0:
+            category, subcategory, _, _ = categorize_merchant(merchant_text)
+            return Annotation("refund", category or "Other", subcategory, 0.76, "Credit-card refund or merchant credit")
+        category, subcategory, confidence, explanation = categorize_merchant(merchant_text)
+        if category:
+            return Annotation("household_spend", category, subcategory, confidence, explanation)
+        return Annotation("household_spend", "Other", "Card Spend", 0.62, "Imported credit-card transaction")
 
     if role == "wise":
         if amount < 0 and "SHARES" in text:
@@ -290,6 +353,15 @@ def classify_transaction(
         if amount > 0 and "INTEREST" in text:
             return Annotation("income", "Interest", "Savings", 0.9, "Savings account interest received")
 
+    if amount > 0 and any(keyword in text for keyword in CASH_DEPOSIT_KEYWORDS):
+        return Annotation("internal_transfer", "Cash Deposit", "", 0.82, "Cash deposited into bank account")
+
+    if amount > 0 and "DEPOTBETALING" in text:
+        return Annotation("refund", "Home and Furniture", "Home Improvement", 0.82, "Mortgage/home-improvement depot payment")
+
+    if any(keyword in text for keyword in ("TRANSFERWISE", "WISE EUROPE", "WISE PAYMENTS")):
+        return Annotation("internal_transfer", "Inter-account Transfers", "Wise", 0.84, "Wise/TransferWise own-account bridge")
+
     if amount > 0 and any(keyword in text for keyword in SOCIAL_INSURANCE_KEYWORDS):
         if any(keyword in text for keyword in CHILD_BENEFIT_KEYWORDS):
             return Annotation("income", "Benefits", "Child Benefit", 0.94, "Dutch SVB child-benefit payment")
@@ -300,8 +372,10 @@ def classify_transaction(
 
     if tx["id"] in refund_category_by_id or (amount > 0 and any(keyword in text for keyword in REFUND_KEYWORDS)):
         category, subcategory = refund_category_by_id.get(tx["id"], ("", ""))
-        if not category:
+        if not category or category == "Uncategorized":
             category, subcategory, _, _ = categorize_merchant(merchant_text)
+        if not category or category == "Uncategorized":
+            category, subcategory, _, _ = categorize_merchant(text)
         return Annotation("refund", category or "Uncategorized", subcategory, 0.84, "Refund reduces original category when matched")
 
     if tx["id"] in transfer_set:
@@ -352,13 +426,20 @@ def classify_transaction(
 
     if amount > 0:
         category, subcategory, _, _ = categorize_merchant(merchant_text)
+        if not category:
+            category, subcategory, _, _ = categorize_merchant(text)
         if category:
             return Annotation("refund", category, subcategory, 0.7, "Positive merchant credit treated as refund")
+
+    if amount > 0 and amount < ONE_OFF_INFLOW_REVIEW_THRESHOLD:
+        return Annotation("refund", "Other", "Misc", 0.62, "Small unmatched credit treated as misc refund")
 
     if amount > 0:
         return Annotation("needs_review", "Uncategorized", "", 0.45, "Positive transaction is not salary or reimbursement")
 
     category, subcategory, confidence, explanation = categorize_merchant(merchant_text)
+    if not category:
+        category, subcategory, confidence, explanation = categorize_merchant(text)
     if category:
         return Annotation("household_spend", category, subcategory, confidence, explanation)
 
@@ -505,19 +586,21 @@ def is_cash_bonus_income(tx: Dict) -> bool:
 
 
 def detect_salary_ids(transactions: List[Dict]) -> set:
-    by_merchant: Dict[str, List[Dict]] = defaultdict(list)
+    by_source: Dict[str, List[Dict]] = defaultdict(list)
     for tx in transactions:
         if tx["is_duplicate"] or float(tx["amount"]) <= 0:
             continue
-        merchant = tx.get("normalized_merchant") or tx.get("counterparty_name") or "UNKNOWN"
+        if not is_salary_eligible_account(tx):
+            continue
+        source_key = salary_source_key(tx)
         tx_date = parse_iso_date(tx["transaction_date"])
         if has_salary_keyword(tx):
-            by_merchant[merchant].append(tx)
+            by_source[source_key].append(tx)
         elif is_salary_window(tx_date) and float(tx["amount"]) >= 1500 and not is_transfer_like_income_candidate(tx):
-            by_merchant[merchant].append(tx)
+            by_source[source_key].append(tx)
 
     salary_ids = set()
-    for merchant, items in by_merchant.items():
+    for _source_key, items in by_source.items():
         months = {tx_month(tx) for tx in items}
         if len(months) < 2 and not any(has_salary_keyword(tx) for tx in items):
             continue
@@ -531,6 +614,25 @@ def detect_salary_ids(transactions: List[Dict]) -> set:
             if abs(amount - median) <= tolerance or has_salary_keyword(tx) or is_cash_bonus_income(tx):
                 salary_ids.add(tx["id"])
     return salary_ids
+
+
+def salary_source_key(tx: Dict) -> str:
+    institution = str(tx.get("institution") or "").lower()
+    counterparty_hash = tx.get("counterparty_account_hash") or ""
+    if counterparty_hash:
+        return f"{institution}:counterparty:{counterparty_hash}"
+    merchant = str(tx.get("normalized_merchant") or tx.get("counterparty_name") or "UNKNOWN").upper()
+    merchant = re.sub(r"\b\d{1,8}(?:/\d{4,6})?\b", " ", merchant)
+    merchant = re.sub(r"\s+", " ", merchant).strip()
+    return f"{institution}:merchant:{merchant}"
+
+
+def is_salary_eligible_account(tx: Dict) -> bool:
+    role = tx.get("account_role")
+    institution = str(tx.get("institution") or "").lower()
+    if role != "checking":
+        return False
+    return institution in {"ing", "abn", "generic"}
 
 
 def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float, str, str]]:
@@ -562,6 +664,53 @@ def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, floa
                 continue
             pairs.append((left["id"], right["id"], abs(left_amount), kind, explanation))
             break
+    return pairs
+
+
+def detect_card_settlement_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float, str]]:
+    pairs = []
+    active = [tx for tx in transactions if not tx["is_duplicate"]]
+    bank_candidates = [
+        tx
+        for tx in active
+        if tx["account_role"] in {"checking", "savings"}
+        and float(tx["amount"]) < 0
+        and any(keyword in signal_text(tx) for keyword in CARD_KEYWORDS)
+    ]
+    card_candidates = [
+        tx
+        for tx in active
+        if tx["account_role"] == "credit_card"
+        and float(tx["amount"]) > 0
+        and any(keyword in signal_text(tx) for keyword in CREDIT_CARD_PAYMENT_KEYWORDS)
+    ]
+    used_cards = set()
+    for bank in bank_candidates:
+        bank_amount = abs(float(bank["amount"]))
+        bank_date = parse_iso_date(bank["transaction_date"])
+        best = None
+        best_days = 999
+        for card in card_candidates:
+            if card["id"] in used_cards:
+                continue
+            if abs(float(card["amount"]) - bank_amount) > 0.01:
+                continue
+            days = abs((parse_iso_date(card["transaction_date"]) - bank_date).days)
+            if days > 7 or days >= best_days:
+                continue
+            best = card
+            best_days = days
+        if not best:
+            continue
+        used_cards.add(best["id"])
+        pairs.append(
+            (
+                bank["id"],
+                best["id"],
+                bank_amount,
+                "Matched bank credit-card settlement to imported statement payment",
+            )
+        )
     return pairs
 
 
@@ -792,10 +941,18 @@ def merchant_overlap(left: str, right: str) -> bool:
 
 def categorize_merchant(text: str) -> Tuple[str, str, float, str]:
     for keywords, category, subcategory in MERCHANT_CATEGORY_RULES:
-        if any(keyword in text for keyword in keywords):
-            matched = next(keyword for keyword in keywords if keyword in text)
+        if any(keyword_matches(keyword, text) for keyword in keywords):
+            matched = next(keyword for keyword in keywords if keyword_matches(keyword, text))
             return category, subcategory, 0.82, f"Merchant keyword matched: {matched}"
     return "", "", 0.0, ""
+
+
+def keyword_matches(keyword: str, text: str) -> bool:
+    if not keyword:
+        return False
+    if keyword in {"BP", "ESSO", "NN"}:
+        return re.search(rf"(?<![A-Z0-9]){re.escape(keyword)}(?![A-Z0-9])", text) is not None
+    return keyword in text
 
 
 def rule_matches(tx: Dict, conditions: Dict) -> bool:
@@ -925,6 +1082,14 @@ def review_group_key(row: sqlite3.Row) -> Tuple:
 
 
 def sync_observed_income_events(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM expected_income_events
+        WHERE note = 'Observed during classification'
+           OR note LIKE 'Auto-generated from observed recurring salary cadence%'
+           OR note LIKE 'Auto-generated RSU expectation:%'
+        """
+    )
     rows = conn.execute(
         """
         SELECT
@@ -964,6 +1129,173 @@ def sync_observed_income_events(conn: sqlite3.Connection) -> None:
                 row["id"],
             ),
         )
+
+
+def sync_expected_income_calendar(conn: sqlite3.Connection) -> None:
+    sync_expected_salary_events(conn)
+    sync_expected_rsu_events(conn)
+
+
+def sync_expected_salary_events(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 7) AS month,
+            nt.transaction_date,
+            nt.amount,
+            lower(a.institution) AS institution,
+            ta.subcategory
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount > 0
+          AND ta.economic_class = 'income'
+          AND ta.category = 'Income'
+          AND ta.subcategory IN ('Salary', 'Cash Bonus')
+          AND a.role = 'checking'
+          AND lower(a.institution) IN ('ing', 'abn', 'generic')
+        ORDER BY nt.transaction_date
+        """
+    ).fetchall()
+    salary_by_type: Dict[str, List[sqlite3.Row]] = defaultdict(list)
+    bonus_month_institutions: Dict[str, set] = defaultdict(set)
+    observed_salary_months: Dict[str, set] = defaultdict(set)
+    for row in rows:
+        institution = row["institution"] or ""
+        if row["subcategory"] == "Cash Bonus":
+            bonus_month_institutions[row["month"]].add(institution)
+            continue
+        event_type = "salary"
+        if institution == "ing":
+            event_type = "salary_ing"
+        elif institution == "abn":
+            event_type = "salary_abn"
+        salary_by_type[event_type].append(row)
+        observed_salary_months[event_type].add(row["month"])
+    max_month = latest_closed_transaction_month(conn)
+    if not max_month:
+        return
+    for event_type, items in salary_by_type.items():
+        if len(items) < 2:
+            continue
+        start_month = min(row["month"] for row in items)
+        observed_amounts = [float(row["amount"]) for row in items if str(row["transaction_date"])[5:7] != "02"]
+        if not observed_amounts:
+            observed_amounts = [float(row["amount"]) for row in items]
+        expected_amount = median(observed_amounts)
+        tolerance = max(300.0, expected_amount * 0.15)
+        institution = event_type.split("_", 1)[1] if "_" in event_type else ""
+        for month in iter_months(start_month, max_month):
+            if month in observed_salary_months.get(event_type, set()):
+                continue
+            if month[5:7] == "02" and institution in bonus_month_institutions.get(month, set()):
+                continue
+            expected_date = expected_salary_date(int(month[:4]), int(month[5:7]))
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO expected_income_events (
+                    month, event_type, expected_date, expected_amount, tolerance_amount, status, note
+                ) VALUES (?, ?, ?, ?, ?, 'expected', ?)
+                """,
+                (
+                    month,
+                    event_type,
+                    expected_date,
+                    expected_amount,
+                    tolerance,
+                    "Auto-generated from observed recurring salary cadence; February skipped when bonus covers salary.",
+                ),
+            )
+
+
+def sync_expected_rsu_events(conn: sqlite3.Connection) -> None:
+    observed_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM transaction_annotations
+        WHERE economic_class = 'income'
+          AND category = 'Equity Compensation'
+          AND subcategory = 'RSU'
+        """
+    ).fetchone()["count"]
+    if not observed_count:
+        return
+    bounds = conn.execute(
+        """
+        SELECT MIN(transaction_date) AS min_date, MAX(transaction_date) AS max_date
+        FROM normalized_transactions
+        WHERE is_duplicate = 0
+        """
+    ).fetchone()
+    if not bounds or not bounds["max_date"]:
+        return
+    start_year = max(2023, int((bounds["min_date"] or bounds["max_date"])[:4]))
+    end_year = int(bounds["max_date"][:4])
+    for year in range(start_year, end_year + 1):
+        if bounds["max_date"] < f"{year}-04-30":
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount, status, note
+            ) VALUES (?, 'rsu', ?, NULL, NULL, 'expected', ?)
+            """,
+            (
+                f"{year}-04",
+                f"{year}-04-15",
+                "Auto-generated RSU expectation: vest first week of March, proceeds land on Wise/checking between Mar 1 and May 15.",
+            ),
+        )
+
+
+def latest_closed_transaction_month(conn: sqlite3.Connection) -> str:
+    row = conn.execute(
+        """
+        SELECT MAX(transaction_date) AS max_date
+        FROM normalized_transactions
+        WHERE is_duplicate = 0
+        """
+    ).fetchone()
+    if not row or not row["max_date"]:
+        return ""
+    latest = parse_iso_date(row["max_date"])
+    if latest.day < 28:
+        latest = date(latest.year - 1, 12, 1) if latest.month == 1 else date(latest.year, latest.month - 1, 1)
+    return f"{latest.year:04d}-{latest.month:02d}"
+
+
+def iter_months(start_month: str, end_month: str) -> Iterable[str]:
+    year = int(start_month[:4])
+    month = int(start_month[5:7])
+    end_year = int(end_month[:4])
+    end_num = int(end_month[5:7])
+    while (year, month) <= (end_year, end_num):
+        yield f"{year:04d}-{month:02d}"
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+
+
+def expected_salary_date(year: int, month: int) -> str:
+    if month == 12:
+        return f"{year}-12-21"
+    payday = date(year, month, 25)
+    if payday.weekday() == calendar.SATURDAY:
+        day = 24
+    elif payday.weekday() == calendar.SUNDAY:
+        day = 26
+    else:
+        day = 25
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def median(values: List[float]) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    return ordered[len(ordered) // 2]
 
 
 def income_event_type(row: Dict) -> str:
@@ -1023,19 +1355,44 @@ def create_expected_income_reviews(conn: sqlite3.Connection) -> None:
             """,
             (
                 event["id"],
-                abs(float(event["expected_amount"] or 0)),
+                expected_event_materiality(dict(event)),
                 json_dumps(suggested),
                 f"Expected income event not observed: {event['event_type']} for {event['month']}",
             ),
         )
 
 
+def expected_event_materiality(event: Dict) -> float:
+    if event.get("expected_amount") is not None:
+        return abs(float(event["expected_amount"] or 0))
+    if event.get("event_type") == "rsu":
+        return 1000.0
+    return 1.0
+
+
 def find_expected_income_observation(conn: sqlite3.Connection, event: Dict) -> Optional[sqlite3.Row]:
+    if event["event_type"] == "rsu":
+        year = int(event["month"][:4])
+        return conn.execute(
+            """
+            SELECT nt.id
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND nt.transaction_date BETWEEN ? AND ?
+              AND ta.economic_class = 'income'
+              AND ta.category = 'Equity Compensation'
+              AND ta.subcategory = 'RSU'
+            ORDER BY nt.amount DESC
+            LIMIT 1
+            """,
+            (f"{year}-03-01", f"{year}-05-15"),
+        ).fetchone()
     expected_amount = event.get("expected_amount")
     tolerance = float(event.get("tolerance_amount") or 0)
     params: List = [event["month"], event["event_type"]]
     amount_clause = ""
-    if expected_amount is not None:
+    if expected_amount is not None and not str(event["event_type"]).startswith("salary"):
         amount_clause = "AND ABS(nt.amount - ?) <= ?"
         params.extend([float(expected_amount), tolerance or max(1.0, abs(float(expected_amount)) * 0.02)])
     return conn.execute(

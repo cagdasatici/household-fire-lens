@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import sqlite3
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -12,10 +13,14 @@ from .database import json_dumps
 from .parsers import (
     PARSER_VERSION,
     ParseError,
+    ParsedBalanceAnchor,
     ParsedTransaction,
     file_sha256,
     fingerprint,
     normalize_merchant,
+    parse_abn_annual_overview_pdf_text,
+    parse_abn_statement_pdf_text,
+    parse_ing_credit_card_pdf_text,
     parse_transactions,
     row_hash,
     stable_hash,
@@ -34,7 +39,7 @@ def default_role_for_institution(institution: str, requested_role: Optional[str]
         return "investment"
     if institution == "wise":
         return "wise"
-    if institution == "amex":
+    if institution in {"amex", "ing_credit_card"}:
         return "credit_card"
     return "unknown"
 
@@ -73,9 +78,29 @@ def import_csv(
         (detected, account_hint, filename, file_hash, statement_year, PARSER_VERSION, len(parsed)),
     )
     source_file_id = cursor.lastrowid
+    imported, duplicates = insert_parsed_transactions(conn, source_file_id, detected, parsed, account_role)
+    conn.commit()
+    return {
+        "status": "imported",
+        "source_file_id": source_file_id,
+        "filename": filename,
+        "institution": detected,
+        "statement_year": statement_year,
+        "imported": imported,
+        "duplicates": duplicates,
+        "parser_version": PARSER_VERSION,
+    }
+
+
+def insert_parsed_transactions(
+    conn: sqlite3.Connection,
+    source_file_id: int,
+    detected: str,
+    parsed: Iterable[ParsedTransaction],
+    account_role: Optional[str],
+) -> Tuple[int, int]:
     imported = 0
     duplicates = 0
-
     for tx in parsed:
         raw_hash = row_hash(tx.raw)
         raw_cursor = conn.execute(
@@ -92,25 +117,14 @@ def import_csv(
                 (source_file_id, raw_hash),
             ).fetchone()["id"]
 
-        account_hash = stable_hash(tx.account_identifier or tx.account_hint or f"{detected}:unknown")
-        role = default_role_for_institution(detected, account_role)
-        account_row = conn.execute(
-            "SELECT id, role FROM accounts WHERE institution = ? AND account_identifier_hash = ?",
-            (detected, account_hash),
-        ).fetchone()
-        if account_row:
-            account_id = account_row["id"]
-            if account_role and account_row["role"] in {"unknown", ""}:
-                conn.execute("UPDATE accounts SET role = ? WHERE id = ?", (account_role, account_id))
-        else:
-            account_cursor = conn.execute(
-                """
-                INSERT INTO accounts (institution, display_name, role, currency, account_identifier_hash, is_own_account)
-                VALUES (?, ?, ?, ?, ?, 1)
-                """,
-                (detected, tx.account_hint or f"{detected.upper()} account", role, tx.currency, account_hash),
-            )
-            account_id = account_cursor.lastrowid
+        account_id, account_hash = get_or_create_account(
+            conn,
+            detected,
+            tx.account_identifier or tx.account_hint or f"{detected}:unknown",
+            tx.account_hint or f"{detected.upper()} account",
+            account_role,
+            tx.currency,
+        )
 
         converted_amount, converted_currency, amount_detail = normalize_amount_for_storage(conn, tx)
         merchant = normalize_merchant(tx.counterparty_name) or normalize_merchant(tx.description)
@@ -183,17 +197,36 @@ def import_csv(
                 (normalized_id, duplicate_row["id"], abs(converted_amount)),
             )
 
-    conn.commit()
-    return {
-        "status": "imported",
-        "source_file_id": source_file_id,
-        "filename": filename,
-        "institution": detected,
-        "statement_year": statement_year,
-        "imported": imported,
-        "duplicates": duplicates,
-        "parser_version": PARSER_VERSION,
-    }
+    return imported, duplicates
+
+
+def get_or_create_account(
+    conn: sqlite3.Connection,
+    institution: str,
+    account_identifier: str,
+    display_name: str,
+    account_role: Optional[str],
+    currency: str = "EUR",
+) -> Tuple[int, str]:
+    account_hash = stable_hash(account_identifier)
+    role = default_role_for_institution(institution, account_role)
+    account_row = conn.execute(
+        "SELECT id, role FROM accounts WHERE institution = ? AND account_identifier_hash = ?",
+        (institution, account_hash),
+    ).fetchone()
+    if account_row:
+        account_id = account_row["id"]
+        if account_role and account_row["role"] in {"unknown", ""}:
+            conn.execute("UPDATE accounts SET role = ? WHERE id = ?", (account_role, account_id))
+        return account_id, account_hash
+    account_cursor = conn.execute(
+        """
+        INSERT INTO accounts (institution, display_name, role, currency, account_identifier_hash, is_own_account)
+        VALUES (?, ?, ?, ?, ?, 1)
+        """,
+        (institution, display_name, role, currency or "EUR", account_hash),
+    )
+    return account_cursor.lastrowid, account_hash
 
 
 def normalize_amount_for_storage(conn: sqlite3.Connection, tx: ParsedTransaction) -> Tuple[float, str, Dict[str, Any]]:
@@ -403,8 +436,132 @@ def record_failed_import(
     }
 
 
+def extract_pdf_text(path: Path) -> str:
+    result = subprocess.run(
+        ["pdftotext", "-layout", str(path), "-"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def import_pdf_file(
+    conn: sqlite3.Connection,
+    path: Path,
+    filename: str,
+    institution: Optional[str],
+    account_role: Optional[str],
+    account_hint: str,
+) -> Dict[str, Any]:
+    content = path.read_bytes()
+    file_hash = file_sha256(content)
+    existing = conn.execute("SELECT id, status FROM source_files WHERE file_hash = ?", (file_hash,)).fetchone()
+    if existing and existing["status"] == "imported":
+        return {
+            "status": "duplicate_file",
+            "source_file_id": existing["id"],
+            "filename": filename,
+            "imported": 0,
+            "duplicates": 0,
+            "message": "This exact file was already imported.",
+        }
+    if existing:
+        conn.execute("DELETE FROM source_files WHERE id = ?", (existing["id"],))
+        conn.commit()
+
+    detected = institution or "unknown"
+    text = extract_pdf_text(path)
+    parsed: List[ParsedTransaction] = []
+    anchors: List[ParsedBalanceAnchor] = []
+    status = "imported"
+    note = ""
+
+    if detected == "ing_credit_card":
+        parsed = parse_ing_credit_card_pdf_text(filename, text, account_hint)
+    elif detected == "abn" and "Financieel Jaaroverzicht" in text:
+        anchors = parse_abn_annual_overview_pdf_text(filename, text, account_hint)
+    elif detected == "abn" and "Rekeningafschrift" in text:
+        parsed, anchors = parse_abn_statement_pdf_text(filename, text, account_hint)
+        if not parsed:
+            status = "skipped_overlap"
+            note = "ABN PDF statement overlaps the authoritative TAB/CSV period; no rows imported."
+    else:
+        return record_failed_import(
+            conn,
+            filename,
+            content,
+            detected,
+            account_hint,
+            "unsupported",
+            "Unsupported PDF layout for current importer.",
+        )
+
+    row_count = len(parsed) + len(anchors)
+    statement_year = infer_statement_year(parsed)
+    if not statement_year and anchors:
+        statement_year = max(int(anchor.observation_date[:4]) for anchor in anchors)
+    cursor = conn.execute(
+        """
+        INSERT INTO source_files (
+            institution, account_hint, filename, file_hash, statement_year,
+            parser_version, row_count, status, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (detected, account_hint, filename, file_hash, statement_year, PARSER_VERSION, row_count, status, note or None),
+    )
+    source_file_id = cursor.lastrowid
+    imported, duplicates = insert_parsed_transactions(conn, source_file_id, detected, parsed, account_role)
+    for anchor in anchors:
+        store_balance_anchor(conn, source_file_id, anchor)
+    conn.commit()
+    return {
+        "status": status,
+        "source_file_id": source_file_id,
+        "filename": filename,
+        "institution": detected,
+        "statement_year": statement_year,
+        "imported": imported,
+        "balance_anchors": len(anchors),
+        "duplicates": duplicates,
+        "parser_version": PARSER_VERSION,
+        "message": note,
+    }
+
+
+def store_balance_anchor(conn: sqlite3.Connection, source_file_id: int, anchor: ParsedBalanceAnchor) -> None:
+    account_id, _ = get_or_create_account(
+        conn,
+        anchor.institution,
+        anchor.account_identifier,
+        anchor.account_hint,
+        anchor.role,
+        anchor.currency,
+    )
+    conn.execute(
+        """
+        INSERT INTO balance_observations (
+            account_id, source_file_id, transaction_id, observation_date,
+            balance_type, amount, currency, confidence, note
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            source_file_id,
+            anchor.observation_date,
+            anchor.balance_type,
+            anchor.amount,
+            anchor.currency,
+            anchor.confidence,
+            anchor.note,
+        ),
+    )
+
+
 def hints_for_path(path: Path) -> Tuple[Optional[str], Optional[str], str]:
     parts = {part.lower() for part in path.parts}
+    if "monthly_salary_statements" in parts:
+        return "payslip", "document", "Monthly Salary Statement"
     if "ing_savings" in parts:
         return "ing", "savings", "ING Savings"
     if "ing_checking" in parts:
@@ -435,6 +592,33 @@ def import_directory(conn: sqlite3.Connection, directory: str) -> Dict[str, Any]
         filename = str(path.relative_to(root))
         content = path.read_bytes()
         suffix = path.suffix.lower()
+        if institution == "payslip":
+            result = record_failed_import(
+                conn,
+                filename,
+                content,
+                institution,
+                account_hint,
+                "skipped",
+                "Payslips are optional pension-model inputs; skipped by the zero-toil import policy.",
+            )
+            results.append(result)
+            continue
+        if suffix == ".pdf":
+            try:
+                result = import_pdf_file(conn, path, filename, institution, role, account_hint)
+            except Exception as exc:
+                result = record_failed_import(
+                    conn,
+                    filename,
+                    content,
+                    institution or "unknown",
+                    account_hint,
+                    "failed",
+                    str(exc),
+                )
+            results.append(result)
+            continue
         if suffix not in supported:
             result = record_failed_import(
                 conn,

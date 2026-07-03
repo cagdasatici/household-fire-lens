@@ -7,7 +7,13 @@ from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
 from household_fire_lens.importer import import_csv, import_directory
-from household_fire_lens.parsers import normalize_merchant, parse_transactions
+from household_fire_lens.parsers import (
+    normalize_merchant,
+    parse_abn_annual_overview_pdf_text,
+    parse_abn_statement_pdf_text,
+    parse_ing_credit_card_pdf_text,
+    parse_transactions,
+)
 
 
 ING_CSV = """Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag (EUR);MutatieSoort;Mededelingen
@@ -156,6 +162,34 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows["Tikkie received for party"]["economic_class"], "reimbursement_pass_through")
         self.assertEqual(rows["Wage/Salary 202602 ING"]["subcategory"], "Cash Bonus")
         self.assertEqual(rows["Wage/Salary 202602 ABN"]["subcategory"], "Salary")
+
+    def test_payroll_source_hash_handles_salary_wording_drift(self):
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2026-11-25,ABN Fixed,Wage/Salary 202611,Booking.com Payroll,booking-payroll,2700.00,EUR
+2026-12-20,ABN Fixed,BOOKING.COM B.V. 42/202612,Booking.com Payroll 42,booking-payroll,2700.00,EUR
+2026-12-20,ABN Fixed,Booking.com expense reimbursement,Booking.com Expense,booking-expense,2400.00,EUR
+2027-01-25,ABN Fixed,Wage/Salary 202701,Booking.com Payroll,booking-payroll,2750.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-abn-payroll-drift.csv",
+            csv_text.encode("utf-8"),
+            institution="abn",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["BOOKING.COM B.V. 42/202612"]["subcategory"], "Salary")
+        self.assertEqual(rows["Booking.com expense reimbursement"]["economic_class"], "reimbursement_pass_through")
 
     def test_duplicate_file_does_not_double_count(self):
         first = import_csv(
@@ -935,7 +969,7 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertEqual(row["category"], "Investments")
         self.assertEqual(row["subcategory"], "RSU Settlement")
 
-    def test_amex_parser_flips_card_statement_signs_and_defers_spend(self):
+    def test_amex_parser_flips_card_statement_signs_and_counts_spend(self):
         import_csv(
             self.conn,
             "activity.csv",
@@ -958,8 +992,8 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertEqual(rows["HARTELIJK BEDANKT VOOR UW BETALING"]["amount"], 2434.75)
         self.assertEqual(rows["HARTELIJK BEDANKT VOOR UW BETALING"]["economic_class"], "internal_transfer")
         self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["amount"], -23.0)
-        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["economic_class"], "ignore_noise")
-        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["subcategory"], "Pending Settlement Pairing")
+        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["economic_class"], "household_spend")
+        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["subcategory"], "Card Spend")
 
     def test_ibkr_activity_statement_parses_deposit_withdrawal_section(self):
         institution, parsed = parse_transactions(
@@ -981,18 +1015,91 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         root = Path(self.temp_dir.name) / "input_documents"
         (root / "ING_savings").mkdir(parents=True)
         (root / "Wise").mkdir()
-        (root / "ING_cc").mkdir()
+        (root / "Other_docs").mkdir()
         (root / "ING_savings" / "savings.csv").write_text(ING_SAVINGS_CSV, encoding="utf-8")
         (root / "Wise" / "wise.csv").write_text(WISE_CSV, encoding="utf-8")
-        (root / "ING_cc" / "Afschrift.pdf").write_bytes(b"%PDF-1.4 placeholder")
+        (root / "Other_docs" / "readme.docx").write_bytes(b"placeholder")
         report = import_directory(self.conn, str(root))
         self.assertEqual(report["status_counts"]["imported"], 2)
         self.assertEqual(report["status_counts"]["unsupported"], 1)
         unsupported = self.conn.execute(
-            "SELECT status, error_message FROM source_files WHERE filename LIKE '%Afschrift.pdf'"
+            "SELECT status, error_message FROM source_files WHERE filename LIKE '%readme.docx'"
         ).fetchone()
         self.assertEqual(unsupported["status"], "unsupported")
         self.assertIn("Unsupported file extension", unsupported["error_message"])
+
+    def test_ing_credit_card_pdf_text_parser_extracts_statement_rows(self):
+        text = """
+        Afschrift Creditcard
+        Periode
+        04-05-2026 t/m 03-06-2026
+        Overeenkomstnummer
+        2100 0000 0000
+        Op 05-06-2026 schrijven wij 1.987,19 euro af van uw betaalrekening met nummer NL00 INGB 0000 0000 00.
+
+        Geboekt op     Naam / Omschrijving / Mededeling                                      Type                               Bedrag (EUR)
+        03-06-2026 AFLOSSING                                                                 Incasso                             +1.987,19
+                   Kaartnummer: 5248 **** **** 0000
+        30-05-2026 EXAMPLE SUBSCRIPTION AMSTERDAM                                             Betaling                                -21,78
+                   Transactiedatum: 29-05-2026
+                   Kaartnummer: 5248 **** **** 0000
+        """
+        parsed = parse_ing_credit_card_pdf_text("Afschrift.pdf", text, "ING Credit Card")
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].amount, 1987.19)
+        self.assertEqual(parsed[0].counterparty_name, "AFLOSSING")
+        self.assertEqual(parsed[1].amount, -21.78)
+        self.assertIn("EXAMPLE SUBSCRIPTION", parsed[1].description)
+
+    def test_abn_statement_pdf_text_parser_imports_only_pre_tab_rows(self):
+        text = """
+        Rekeningafschrift
+        Rekeningnummer                 IBAN                     Datum afschrift                  Aantal bladen Blad     Volgnr
+        00.00.00.000                   NL00ABNA0000000000       30-12-2024                       1              001    12
+        Vorig saldo                    Nieuw saldo              Totaal afgeschreven              Totaal bijgeschreven
+        2.476,18 +/CREDIT              583,41 +/CREDIT          1.000,00                         100,00
+        Boekdatum       Omschrijving                            Bedrag af (debet)                Bedrag bij (credit)
+        (Rentedatum)
+        30-12           SEPA Incasso algemeen doorlopend                              1.815,31
+        (30-12)         Naam: Example Mortgage
+                        IBAN: NL00ABNA0000000001
+        21-12           SEPA Overboeking                                                                         2.700,00
+        (21-12)         Naam: Example Employer
+                        IBAN: NL00BANK0000000000
+        """
+        parsed, anchors = parse_abn_statement_pdf_text("Rekeningafschrift.pdf", text, "ABN Checking")
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].transaction_date, "2024-12-30")
+        self.assertEqual(parsed[0].amount, -1815.31)
+        self.assertEqual(parsed[1].amount, 2700.0)
+        self.assertEqual(len(anchors), 2)
+        self.assertEqual(anchors[-1].amount, 583.41)
+
+        overlap_text = text.replace("30-12-2024", "30-12-2025")
+        parsed, anchors = parse_abn_statement_pdf_text("Rekeningafschrift.pdf", overlap_text, "ABN Checking")
+        self.assertEqual(parsed, [])
+        self.assertEqual(len(anchors), 2)
+
+    def test_abn_annual_overview_pdf_text_parser_extracts_balance_anchors(self):
+        text = """
+        Financieel Jaaroverzicht
+        690839
+        ABN AMRO Financieel Jaaroverzicht 2025
+        Betalen en sparen
+                                                             Saldo                              Saldo
+                                                        31-12-2024                         31-12-2025
+        NL00 ABNA 0000 0000 00
+                                                            349,16                            537,53
+        Hypotheken
+        Hypotheeknummer 10.00.00.000
+           Leningdeelnr: 101 Aflossingsvrije                       -113.000,00                         -112.000,00                                                                1.672,44
+           Aflossingsvrije Hypotheek
+        """
+        anchors = parse_abn_annual_overview_pdf_text("overview.pdf", text, "ABN Checking")
+        self.assertGreaterEqual(len(anchors), 5)
+        self.assertEqual(anchors[0].observation_date, "2024-12-31")
+        self.assertEqual(anchors[0].amount, 349.16)
+        self.assertEqual(anchors[-1].balance_type, "paid_interest")
 
     def test_unscoped_review_rule_does_not_classify_everything(self):
         self.import_and_classify()
@@ -1218,7 +1325,7 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         ).fetchone()["count"]
         self.assertEqual(rows["RVO."]["economic_class"], "refund")
         self.assertEqual(rows["RVO."]["category"], "Home and Furniture")
-        self.assertEqual(rows["RVO."]["subcategory"], "")
+        self.assertEqual(rows["RVO."]["subcategory"], "Home Improvement")
         self.assertEqual(rows["RVO."]["digest_tier"], "auto_silent")
         self.assertIsNotNone(link)
         self.assertEqual(link["amount"], 4200.0)
@@ -1271,6 +1378,38 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertEqual(review["event_type"], "salary_ing")
         self.assertEqual(review["month"], "2026-05")
         self.assertEqual(review["materiality"], 5200.0)
+
+    def test_observed_salary_satisfies_expected_event_even_when_amount_moves(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-25,ING Main,Wage/Salary 202605,Booking.com Payroll,4800.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-variable-salary.csv",
+            csv_text.encode("utf-8"),
+            institution="ing",
+            account_role="checking",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount, status
+            ) VALUES ('2026-05', 'salary_ing', '2026-05-25', 5200.00, 250.00, 'expected')
+            """
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        review_count = self.conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM review_items ri
+            JOIN expected_income_events eie ON eie.id = ri.expected_event_id
+            WHERE ri.status = 'open'
+              AND eie.event_type = 'salary_ing'
+              AND eie.month = '2026-05'
+            """
+        ).fetchone()["count"]
+        self.assertEqual(review_count, 0)
 
     def test_digest_tiers_are_persisted_for_auto_classifications(self):
         self.import_and_classify()
