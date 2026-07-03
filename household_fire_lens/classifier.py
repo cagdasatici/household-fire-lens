@@ -62,6 +62,7 @@ SALARY_KEYWORDS = ("SALARY", "SALARIS", "PAYROLL", "LOON", "WAGE")
 BONUS_KEYWORDS = ("BONUS", "CASH BONUS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
 REIMBURSEMENT_KEYWORDS = ("REIMBURSEMENT", "VERGOEDING", "EXPENSE REIMBURSEMENT")
+SUBSIDY_LINK_KEYWORDS = ("RVO", "ISDE", "SUBSIDIE", "SUBSIDY", "CLAIM", "UITKERING", "VERZEKERING", "INSURANCE")
 BANK_FEE_KEYWORDS = ("BASISPAKKET", "BETAALPAS", "BETAALPAKKET", "PAKKETKOSTEN", "BANKKOSTEN")
 BANK_INTEREST_KEYWORDS = ("CREDITRENTE", "DEBETRENTE")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
@@ -75,6 +76,7 @@ RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 MAX_OPEN_REVIEW_GROUPS = 150
 UNKNOWN_OUTFLOW_REVIEW_THRESHOLD = 250.0
+ONE_OFF_INFLOW_REVIEW_THRESHOLD = 500.0
 DIRECT_DEBIT_CREDITOR_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}ZZZ[A-Z0-9]{8,}\b")
 RECURRING_DIRECT_DEBIT_MIN_OCCURRENCES = 6
 RECURRING_DIRECT_DEBIT_AMOUNT_TOLERANCE_PCT = 0.02
@@ -89,6 +91,7 @@ class Annotation:
     explanation: str = ""
     rule_id: Optional[int] = None
     review_status: str = "auto"
+    digest_tier: str = ""
 
 
 @dataclass
@@ -149,12 +152,13 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             entity_hints=entity_hints,
         )
         counts[annotation.economic_class] += 1
+        digest_tier = annotation.digest_tier or digest_tier_for(annotation)
         conn.execute(
             """
             INSERT OR REPLACE INTO transaction_annotations (
                 transaction_id, economic_class, category, subcategory, confidence,
-                rule_id, review_status, explanation, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                rule_id, review_status, digest_tier, explanation, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 tx["id"],
@@ -164,13 +168,31 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
                 annotation.confidence,
                 annotation.rule_id,
                 annotation.review_status,
+                digest_tier,
                 annotation.explanation,
             ),
         )
 
+    link_one_off_inflows(conn)
     create_review_items(conn)
+    sync_observed_income_events(conn)
+    create_expected_income_reviews(conn)
     conn.commit()
     return dict(counts)
+
+
+def digest_tier_for(annotation: Annotation) -> str:
+    if annotation.review_status == "reviewed":
+        return "reviewed"
+    if annotation.economic_class == "needs_review":
+        return "review"
+    if annotation.confidence < 0.70:
+        if annotation.category == "Uncategorized":
+            return "review"
+        return "auto_visible"
+    if annotation.confidence >= 0.90:
+        return "auto_silent"
+    return "auto_visible"
 
 
 def load_transactions(conn: sqlite3.Connection) -> List[Dict]:
@@ -602,6 +624,137 @@ def detect_refund_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float,
     return pairs
 
 
+def link_one_off_inflows(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            nt.id, nt.transaction_date, nt.amount, nt.direction, nt.counterparty_name,
+            nt.counterparty_account_hash, nt.description, nt.normalized_merchant, nt.reference,
+            a.display_name AS account_name, a.institution,
+            ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.explanation
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount >= ?
+        ORDER BY nt.transaction_date, nt.id
+        """,
+        (ONE_OFF_INFLOW_REVIEW_THRESHOLD,),
+    ).fetchall()
+    for row in rows:
+        tx = dict(row)
+        text = signal_text(tx)
+        if known_structural_inflow(tx) and tx["economic_class"] != "refund":
+            continue
+        linked = False
+        if any(keyword in text for keyword in SUBSIDY_LINK_KEYWORDS):
+            linked = link_subsidy_offset(conn, tx)
+        if linked:
+            continue
+        if known_structural_inflow(tx):
+            continue
+        mark_one_off_inflow_for_review(conn, tx)
+
+
+def known_structural_inflow(tx: Dict) -> bool:
+    if tx["economic_class"] in {"refund", "reimbursement_pass_through", "wealth_allocation", "internal_transfer"}:
+        return True
+    category = tx.get("category") or ""
+    subcategory = tx.get("subcategory") or ""
+    if category == "Interest":
+        return True
+    if category == "Income" and subcategory in {"Salary", "Cash Bonus"}:
+        return True
+    if category == "Equity Compensation" and subcategory == "RSU":
+        return True
+    if category == "Benefits" and subcategory == "Child Benefit":
+        return True
+    return False
+
+
+def link_subsidy_offset(conn: sqlite3.Connection, inflow: Dict) -> bool:
+    inflow_amount = float(inflow["amount"])
+    inflow_date = parse_iso_date(inflow["transaction_date"])
+    candidates = conn.execute(
+        """
+        SELECT
+            nt.id, nt.transaction_date, nt.amount, nt.description, nt.normalized_merchant,
+            ta.category, ta.subcategory
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ABS(nt.amount) >= ?
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND COALESCE(ta.category, '') NOT IN ('', 'Uncategorized', 'Unknown Card Spend')
+        """,
+        (inflow_amount * 3.0,),
+    ).fetchall()
+    best = None
+    best_days = 366
+    for row in candidates:
+        candidate_date = parse_iso_date(row["transaction_date"])
+        days = abs((candidate_date - inflow_date).days)
+        if days > 365 or days >= best_days:
+            continue
+        best = row
+        best_days = days
+    if not best:
+        return False
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO transaction_links (
+            link_type, from_transaction_id, to_transaction_id, amount, confidence, explanation
+        ) VALUES ('subsidy_offset', ?, ?, ?, 0.93, ?)
+        """,
+        (
+            inflow["id"],
+            best["id"],
+            inflow_amount,
+            "Linked one-off subsidy/claim inflow to a related large household outflow",
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE transaction_annotations
+        SET economic_class = 'refund',
+            category = ?,
+            subcategory = ?,
+            confidence = 0.93,
+            digest_tier = 'auto_silent',
+            explanation = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = ?
+        """,
+        (
+            best["category"] or "Uncategorized",
+            best["subcategory"] or "",
+            f"Linked one-off subsidy/claim to transaction {best['id']} ({best['normalized_merchant'] or best['description'] or 'large outflow'})",
+            inflow["id"],
+        ),
+    )
+    return True
+
+
+def mark_one_off_inflow_for_review(conn: sqlite3.Connection, tx: Dict) -> None:
+    if float(tx["amount"]) < ONE_OFF_INFLOW_REVIEW_THRESHOLD:
+        return
+    if tx["economic_class"] not in {"income", "needs_review"}:
+        return
+    conn.execute(
+        """
+        UPDATE transaction_annotations
+        SET digest_tier = 'review',
+            confidence = MIN(confidence, 0.69),
+            explanation = COALESCE(explanation, '') || '; one-off inflow above review threshold needs a source/link',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = ?
+        """,
+        (tx["id"],),
+    )
+
+
 def merchant_overlap(left: str, right: str) -> bool:
     left_words = {word for word in left.split() if len(word) >= 3}
     right_words = {word for word in right.split() if len(word) >= 3}
@@ -742,18 +895,159 @@ def review_group_key(row: sqlite3.Row) -> Tuple:
     return ("transaction", row["id"])
 
 
+def sync_observed_income_events(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            nt.id,
+            nt.transaction_date,
+            nt.amount,
+            a.institution,
+            ta.category,
+            ta.subcategory
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount > 0
+          AND ta.economic_class = 'income'
+        """
+    ).fetchall()
+    for row in rows:
+        event_type = income_event_type(dict(row))
+        if not event_type:
+            continue
+        conn.execute(
+            """
+            INSERT INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount,
+                status, observed_transaction_id, note
+            ) VALUES (?, ?, ?, ?, 0, 'observed', ?, 'Observed during classification')
+            ON CONFLICT(month, event_type, expected_date) DO UPDATE SET
+                status = 'observed',
+                observed_transaction_id = excluded.observed_transaction_id
+            """,
+            (
+                str(row["transaction_date"])[:7],
+                event_type,
+                row["transaction_date"],
+                float(row["amount"]),
+                row["id"],
+            ),
+        )
+
+
+def income_event_type(row: Dict) -> str:
+    category = row.get("category") or ""
+    subcategory = row.get("subcategory") or ""
+    institution = str(row.get("institution") or "").lower()
+    if category == "Income" and subcategory == "Salary":
+        if institution == "abn":
+            return "salary_abn"
+        if institution == "ing":
+            return "salary_ing"
+        return "salary"
+    if category == "Income" and subcategory == "Cash Bonus":
+        return "cash_bonus"
+    if category == "Benefits" and subcategory == "Child Benefit":
+        return "svb_child_benefit"
+    if category == "Equity Compensation" and subcategory == "RSU":
+        return "rsu"
+    return ""
+
+
+def create_expected_income_reviews(conn: sqlite3.Connection) -> None:
+    events = conn.execute(
+        """
+        SELECT *
+        FROM expected_income_events
+        WHERE status = 'expected'
+          AND observed_transaction_id IS NULL
+        ORDER BY month, event_type, expected_date
+        """
+    ).fetchall()
+    for event in events:
+        observed = find_expected_income_observation(conn, dict(event))
+        if observed:
+            conn.execute(
+                """
+                UPDATE expected_income_events
+                SET status = 'observed', observed_transaction_id = ?
+                WHERE id = ?
+                """,
+                (observed["id"], event["id"]),
+            )
+            continue
+        suggested = {
+            "event_type": event["event_type"],
+            "month": event["month"],
+            "expected_date": event["expected_date"],
+            "expected_amount": event["expected_amount"],
+            "action": "import_or_correct_income_source",
+        }
+        conn.execute(
+            """
+            INSERT INTO review_items (
+                transaction_id, expected_event_id, issue_type, materiality,
+                suggested_action_json, reason, status
+            ) VALUES (NULL, ?, 'missing_income_event', ?, ?, ?, 'open')
+            """,
+            (
+                event["id"],
+                abs(float(event["expected_amount"] or 0)),
+                json_dumps(suggested),
+                f"Expected income event not observed: {event['event_type']} for {event['month']}",
+            ),
+        )
+
+
+def find_expected_income_observation(conn: sqlite3.Connection, event: Dict) -> Optional[sqlite3.Row]:
+    expected_amount = event.get("expected_amount")
+    tolerance = float(event.get("tolerance_amount") or 0)
+    params: List = [event["month"], event["event_type"]]
+    amount_clause = ""
+    if expected_amount is not None:
+        amount_clause = "AND ABS(nt.amount - ?) <= ?"
+        params.extend([float(expected_amount), tolerance or max(1.0, abs(float(expected_amount)) * 0.02)])
+    return conn.execute(
+        f"""
+        SELECT nt.id
+        FROM normalized_transactions nt
+        JOIN accounts a ON a.id = nt.account_id
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND substr(nt.transaction_date, 1, 7) = ?
+          AND ta.economic_class = 'income'
+          AND ? = CASE
+              WHEN ta.category = 'Income' AND ta.subcategory = 'Salary' AND lower(a.institution) = 'abn' THEN 'salary_abn'
+              WHEN ta.category = 'Income' AND ta.subcategory = 'Salary' AND lower(a.institution) = 'ing' THEN 'salary_ing'
+              WHEN ta.category = 'Income' AND ta.subcategory = 'Salary' THEN 'salary'
+              WHEN ta.category = 'Income' AND ta.subcategory = 'Cash Bonus' THEN 'cash_bonus'
+              WHEN ta.category = 'Benefits' AND ta.subcategory = 'Child Benefit' THEN 'svb_child_benefit'
+              WHEN ta.category = 'Equity Compensation' AND ta.subcategory = 'RSU' THEN 'rsu'
+              ELSE ''
+          END
+          {amount_clause}
+        ORDER BY ABS(julianday(nt.transaction_date) - julianday(COALESCE(?, nt.transaction_date)))
+        LIMIT 1
+        """,
+        tuple(params + [event.get("expected_date")]),
+    ).fetchone()
+
+
 def create_review_items(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """
         SELECT
             nt.id, nt.amount, nt.direction, nt.normalized_merchant, nt.counterparty_account_hash,
             nt.description, nt.counterparty_name,
-            ta.economic_class, ta.confidence, ta.explanation
+            ta.economic_class, ta.confidence, ta.digest_tier, ta.explanation
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
           AND (
             ta.economic_class = 'needs_review'
+            OR ta.digest_tier = 'review'
             OR ta.confidence < 0.55
             OR (ta.category = 'Uncategorized' AND ABS(nt.amount) >= 100)
           )

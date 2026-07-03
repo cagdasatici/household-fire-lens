@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect_database(path: str) -> sqlite3.Connection:
@@ -46,6 +46,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             institution TEXT NOT NULL,
             display_name TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'unknown',
+            owner TEXT NOT NULL DEFAULT 'self',
             currency TEXT NOT NULL DEFAULT 'EUR',
             account_identifier_hash TEXT NOT NULL,
             is_own_account INTEGER NOT NULL DEFAULT 1,
@@ -95,6 +96,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             confidence REAL NOT NULL,
             rule_id INTEGER,
             review_status TEXT NOT NULL DEFAULT 'auto',
+            digest_tier TEXT NOT NULL DEFAULT 'auto_visible',
             explanation TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -123,6 +125,30 @@ def migrate(conn: sqlite3.Connection) -> None:
             UNIQUE(link_type, from_transaction_id, to_transaction_id)
         );
 
+        CREATE TABLE IF NOT EXISTS known_counterparties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            counterparty_account_hash TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT 'self',
+            relationship TEXT NOT NULL DEFAULT 'own_account',
+            role TEXT NOT NULL DEFAULT 'unknown',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS expected_income_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            month TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            expected_date TEXT,
+            expected_amount REAL,
+            tolerance_amount REAL,
+            status TEXT NOT NULL DEFAULT 'expected',
+            observed_transaction_id INTEGER REFERENCES normalized_transactions(id),
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(month, event_type, expected_date)
+        );
+
         CREATE TABLE IF NOT EXISTS amortization_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -141,6 +167,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS review_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             transaction_id INTEGER REFERENCES normalized_transactions(id),
+            expected_event_id INTEGER REFERENCES expected_income_events(id),
             issue_type TEXT NOT NULL,
             materiality REAL NOT NULL DEFAULT 0,
             suggested_action_json TEXT,
@@ -186,13 +213,27 @@ def migrate(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_entity_enrichment_status ON entity_enrichment_cache(status);
         CREATE INDEX IF NOT EXISTS idx_entity_enrichment_category ON entity_enrichment_cache(category);
+        CREATE INDEX IF NOT EXISTS idx_expected_income_status ON expected_income_events(status, month);
         """
     )
+    ensure_column(conn, "accounts", "owner", "TEXT NOT NULL DEFAULT 'self'")
+    ensure_column(conn, "transaction_annotations", "digest_tier", "TEXT NOT NULL DEFAULT 'auto_visible'")
+    ensure_column(conn, "review_items", "expected_event_id", "INTEGER REFERENCES expected_income_events(id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_expected_event ON review_items(expected_event_id)")
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    if column not in table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:

@@ -27,6 +27,9 @@
       <div class="side-status">
         <span>Local database</span>
         <strong id="side-db-status">checking</strong>
+        <small id="app-git">git unknown</small>
+        <small id="app-db">db unknown</small>
+        <small id="app-classified-at">classified unknown</small>
       </div>
     </aside>
 
@@ -221,7 +224,7 @@
           </div>
           <div class="toolbar compact-toolbar">
             <button id="entity-enrichment-button" type="button">Lookup top merchants online</button>
-            <span id="entity-enrichment-result">Uses OpenStreetMap first, then Wikidata; sends cleaned merchant names only.</span>
+            <span id="entity-enrichment-result">Uses free public lookup sources; sends cleaned merchant names only.</span>
           </div>
           <div id="review-list" class="review-list"></div>
         </div>
@@ -285,6 +288,9 @@
               <option value="savings">Savings</option>
               <option value="investment">Investment</option>
               <option value="mortgage">Mortgage</option>
+              <option value="credit_card">Credit card</option>
+              <option value="wise">Wise</option>
+              <option value="broker_proxy">Broker proxy</option>
               <option value="unknown">Unknown</option>
             </select>
             <input name="account_hint" placeholder="Account label, optional" />
@@ -319,6 +325,15 @@
           </div>
           <div class="table-wrap">
             <table id="rules-table"></table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Rule Audit</h3>
+            <span>Agent/user provenance, scope, and live match count.</span>
+          </div>
+          <div class="table-wrap">
+            <table id="rule-audit-table"></table>
           </div>
         </div>
       </section>

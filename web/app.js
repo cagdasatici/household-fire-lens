@@ -11,14 +11,31 @@ const titles = {
   imports: ["Imports", "Upload files, set account roles, and inspect rules."],
 };
 
-const accountRoles = ["checking", "savings", "investment", "mortgage", "credit_card_proxy", "unknown"];
+const accountRoles = [
+  "checking",
+  "savings",
+  "investment",
+  "mortgage",
+  "credit_card",
+  "credit_card_proxy",
+  "wise",
+  "broker_proxy",
+  "unknown",
+];
 const state = { spending: null, fire: null, optimization: null };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`${response.status} ${body}`);
+    let message = body;
+    try {
+      const parsed = JSON.parse(body);
+      message = parsed.error || parsed.message || body;
+    } catch (_error) {
+      message = body;
+    }
+    throw new Error(`${response.status} ${message}`);
   }
   return response.json();
 }
@@ -48,6 +65,13 @@ function fmtPercent(value) {
 function setText(id, value) {
   const element = document.getElementById(id);
   if (element) element.textContent = value;
+}
+
+async function loadMetadata() {
+  const metadata = await api("/api/metadata");
+  setText("app-git", `git ${metadata.git_hash || "unknown"}`);
+  setText("app-db", metadata.database || "db unknown");
+  setText("app-classified-at", metadata.classified_at ? `classified ${metadata.classified_at}` : "classified never");
 }
 
 function renderTable(id, columns, rows) {
@@ -345,6 +369,7 @@ async function loadTransactions() {
       { key: "category", label: "Category" },
       { key: "account_name", label: "Account" },
       { key: "confidence", label: "Conf.", number: true, render: (row) => fmtPercent(row.confidence) },
+      { key: "digest_tier", label: "Tier" },
       { key: "explanation", label: "Why" },
     ],
     data.transactions || [],
@@ -468,7 +493,12 @@ function renderConfidenceBars(confidence) {
 }
 
 async function loadImports() {
-  const [imports, accounts, rules] = await Promise.all([api("/api/imports"), api("/api/accounts"), api("/api/rules")]);
+  const [imports, accounts, rules, audit] = await Promise.all([
+    api("/api/imports"),
+    api("/api/accounts"),
+    api("/api/rules"),
+    api("/api/rule-audit"),
+  ]);
   renderTable(
     "imports-table",
     [
@@ -492,6 +522,29 @@ async function loadImports() {
     ],
     rules.rules || [],
   );
+  renderRuleAudit(audit.rules || []);
+}
+
+function shortJson(value) {
+  const text = JSON.stringify(value || {});
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
+function renderRuleAudit(rows) {
+  renderTable(
+    "rule-audit-table",
+    [
+      { key: "id", label: "ID", number: true },
+      { key: "name", label: "Rule" },
+      { key: "created_by", label: "By" },
+      { key: "matched_count", label: "Matches", number: true },
+      { key: "matched_value", label: "Value", number: true, render: (row) => fmtPrecise(row.matched_value) },
+      { key: "enabled", label: "On", render: (row) => (row.enabled ? "yes" : "no") },
+      { key: "conditions", label: "Scope", render: (row) => shortJson(row.conditions) },
+      { key: "actions", label: "Action", render: (row) => shortJson(row.actions) },
+    ],
+    rows,
+  );
 }
 
 function renderAccounts(rows) {
@@ -500,6 +553,7 @@ function renderAccounts(rows) {
     [
       { key: "display_name", label: "Account" },
       { key: "institution", label: "Institution" },
+      { key: "owner", label: "Owner" },
       {
         key: "role",
         label: "Role",
@@ -529,6 +583,7 @@ async function updateAccountRole(select) {
 
 async function refreshAll() {
   setText("side-db-status", "refreshing");
+  await loadMetadata();
   await loadFire();
   await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadReview(), loadImports()]);
   setText("side-db-status", "ready");

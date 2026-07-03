@@ -736,6 +736,35 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["category"], "Benefits")
         self.assertEqual(row["subcategory"], "Child Benefit")
 
+    def test_large_svb_child_benefit_does_not_become_subsidy_offset(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,Home improvement invoice,Home Improvement Installer,-3000.00,EUR
+2026-04-02,Main,SEPA OVERBOEKING IBAN BIC RABONL2U NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER,Sociale Verzekeringsbank,710.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-large-svb-benefit.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            """
+            SELECT ta.economic_class, ta.category, ta.subcategory
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.amount > 0
+            """
+        ).fetchone()
+        link_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM transaction_links WHERE link_type = 'subsidy_offset'"
+        ).fetchone()["count"]
+        self.assertEqual(row["economic_class"], "income")
+        self.assertEqual(row["category"], "Benefits")
+        self.assertEqual(row["subcategory"], "Child Benefit")
+        self.assertEqual(link_count, 0)
+
     def test_headerless_abn_tab_export_parses(self):
         institution, parsed = parse_transactions(
             "TXT260702214417.TAB",
@@ -946,6 +975,122 @@ class DomainTests(unittest.TestCase):
             """
         ).fetchone()["count"]
         self.assertEqual(wealth_count, 2)
+
+    def test_schema_v3_has_owner_digest_and_income_calendar_foundations(self):
+        account_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        annotation_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(transaction_annotations)").fetchall()
+        }
+        tables = {
+            row["name"]
+            for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        self.assertIn("owner", account_columns)
+        self.assertIn("digest_tier", annotation_columns)
+        self.assertIn("known_counterparties", tables)
+        self.assertIn("expected_income_events", tables)
+
+    def test_subsidy_inflow_links_to_related_large_outflow_as_refund(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2025-12-15,Main,Home improvement heat pump invoice,Home Improvement Installer,-14972.20,EUR
+2026-01-29,Main,RVO ISDE subsidie heat pump,RVO.,4200.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-subsidy-link.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.normalized_merchant, ta.economic_class, ta.category, ta.subcategory, ta.digest_tier
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        link = self.conn.execute(
+            "SELECT link_type, amount, confidence FROM transaction_links WHERE link_type = 'subsidy_offset'"
+        ).fetchone()
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        self.assertEqual(rows["RVO."]["economic_class"], "refund")
+        self.assertEqual(rows["RVO."]["category"], "Home and Furniture")
+        self.assertEqual(rows["RVO."]["subcategory"], "")
+        self.assertEqual(rows["RVO."]["digest_tier"], "auto_silent")
+        self.assertIsNotNone(link)
+        self.assertEqual(link["amount"], 4200.0)
+        self.assertGreaterEqual(link["confidence"], 0.9)
+        self.assertEqual(review_count, 0)
+
+    def test_unlinked_large_one_off_income_becomes_review_tier(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-29,Main,One-off foundation grant,Example Foundation,4200.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-one-off-income.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        annotation = self.conn.execute(
+            "SELECT economic_class, digest_tier, confidence FROM transaction_annotations"
+        ).fetchone()
+        review = self.conn.execute(
+            "SELECT issue_type, reason FROM review_items WHERE status = 'open'"
+        ).fetchone()
+        self.assertEqual(annotation["economic_class"], "needs_review")
+        self.assertEqual(annotation["digest_tier"], "review")
+        self.assertLess(annotation["confidence"], 0.7)
+        self.assertIsNotNone(review)
+
+    def test_missing_expected_income_event_raises_review_item(self):
+        self.conn.execute(
+            """
+            INSERT INTO expected_income_events (
+                month, event_type, expected_date, expected_amount, tolerance_amount, status
+            ) VALUES ('2026-05', 'salary_ing', '2026-05-25', 5200.00, 250.00, 'expected')
+            """
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        review = self.conn.execute(
+            """
+            SELECT ri.issue_type, ri.materiality, eie.event_type, eie.month
+            FROM review_items ri
+            JOIN expected_income_events eie ON eie.id = ri.expected_event_id
+            WHERE ri.status = 'open'
+            """
+        ).fetchone()
+        self.assertIsNotNone(review)
+        self.assertEqual(review["issue_type"], "missing_income_event")
+        self.assertEqual(review["event_type"], "salary_ing")
+        self.assertEqual(review["month"], "2026-05")
+        self.assertEqual(review["materiality"], 5200.0)
+
+    def test_digest_tiers_are_persisted_for_auto_classifications(self):
+        self.import_and_classify()
+        rows = {
+            row["subcategory"] or row["category"]: row["digest_tier"]
+            for row in self.conn.execute(
+                """
+                SELECT ta.category, ta.subcategory, ta.digest_tier
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["Salary"], "auto_silent")
+        self.assertEqual(rows["Unknown Card Spend"], "auto_visible")
 
 
 if __name__ == "__main__":

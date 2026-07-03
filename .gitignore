@@ -1,6 +1,8 @@
 # Local financial data and imports
 *.csv
 *.tsv
+*.tab
+*.TAB
 *.xls
 *.xlsx
 *.ofx
@@ -13,6 +15,7 @@ exports/
 data/
 local-data/
 private/
+input_documents/
 
 # Bank/investment/export naming patterns
 *abn*.csv
