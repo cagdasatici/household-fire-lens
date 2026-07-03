@@ -368,21 +368,63 @@ class DomainTests(unittest.TestCase):
             account_role="checking",
         )
         classify_all(self.conn)
+        loan_rows_before = self.conn.execute(
+            """
+            SELECT nt.id, ta.economic_class, ta.category, ta.subcategory
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.description LIKE '%Example Loan Bank%'
+            ORDER BY nt.transaction_date
+            """
+        ).fetchall()
+        self.assertEqual(len(loan_rows_before), 6)
+        self.assertEqual({row["economic_class"] for row in loan_rows_before}, {"needs_review"})
+        review = self.conn.execute(
+            """
+            SELECT suggested_action_json, materiality
+            FROM review_items
+            WHERE transaction_id = ?
+            """,
+            (loan_rows_before[0]["id"],),
+        ).fetchone()
+        self.assertIsNotNone(review)
+        self.assertIn("recurring_direct_debit", review["suggested_action_json"])
+
+        rule_id = create_rule_from_review(
+            self.conn,
+            loan_rows_before[0]["id"],
+            "debt_service",
+            "Housing",
+            "Mortgage",
+        )
+        classify_all(self.conn)
         rows = {
             row["description"]: row
             for row in self.conn.execute(
                 """
-                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory, ta.rule_id
                 FROM normalized_transactions nt
                 JOIN transaction_annotations ta ON ta.transaction_id = nt.id
                 """
             ).fetchall()
         }
+        loan_rows_after = [
+            row
+            for row in self.conn.execute(
+                """
+                SELECT ta.economic_class, ta.category, ta.subcategory, ta.rule_id
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                WHERE nt.description LIKE '%Example Loan Bank%'
+                """
+            ).fetchall()
+        ]
 
         self.assertEqual(rows["iDEAL Name Flatex Bank AG Description CASHORDER756656 Cash Order"]["economic_class"], "wealth_allocation")
         self.assertEqual(rows["iDEAL Name Flatex Bank AG Description CASHORDER756656 Cash Order"]["category"], "Investments")
-        self.assertEqual(rows["SEPA Incasso Incassant NL98ZZZ343342590000 Naam ABN AMRO BANK NV Machtiging mortgage collection"]["economic_class"], "debt_service")
-        self.assertEqual(rows["SEPA Incasso Incassant NL98ZZZ343342590000 Naam ABN AMRO BANK NV Machtiging mortgage collection"]["subcategory"], "Mortgage")
+        self.assertEqual({row["economic_class"] for row in loan_rows_after}, {"debt_service"})
+        self.assertEqual({row["subcategory"] for row in loan_rows_after}, {"Mortgage"})
+        self.assertEqual({row["rule_id"] for row in loan_rows_after}, {rule_id})
         self.assertNotEqual(rows["Comfort Partners B.V. Online Banking Name Comfort Partners B.V. Description home installation invoice"]["category"], "Banking and Fees")
         self.assertEqual(rows["Comfort Partners B.V. Online Banking Name Comfort Partners B.V. Description home installation invoice"]["economic_class"], "needs_review")
         self.assertEqual(rows["American Express Europe S.A. Incasso creditcard"]["category"], "Unknown Card Spend")
@@ -398,6 +440,14 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows["BOL.COM refund"]["category"], "Shopping")
         self.assertEqual(rows["Transfer to own savings"]["economic_class"], "internal_transfer")
         self.assertEqual(rows["Transfer from own checking"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["CREDITRENTE savings interest"]["economic_class"], "income")
+        self.assertEqual(rows["CREDITRENTE savings interest"]["category"], "Interest")
+        self.assertEqual(rows["Geldmaat cash withdrawal"]["category"], "Cash Withdrawal")
+        self.assertEqual(rows["SEPA OVERBOEKING NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER"]["economic_class"], "income")
+        self.assertEqual(rows["SEPA OVERBOEKING NAAM SOCIALE VERZEKERINGSBANK OMSCHRIJVING KINDER"]["subcategory"], "Child Benefit")
+        self.assertEqual(rows["NS International train ticket"]["category"], "Transportation")
+        self.assertEqual(rows["Example Hotel booking"]["category"], "Holiday")
+        self.assertEqual(rows["Gemeente local tax"]["category"], "Taxes and Government")
 
     def test_mollie_payment_processor_keeps_embedded_merchant(self):
         self.assertEqual(

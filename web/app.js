@@ -379,6 +379,7 @@ async function loadReview() {
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Holiday">Holiday</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Shopping">Shopping</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Other">Other</button>
+            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="debt_service" data-category="Housing" data-subcategory="Mortgage">Mortgage</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="internal_transfer" data-category="Inter-account Transfers">Inter-acct</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="wealth_allocation" data-category="Investments">Investment</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements">Reimb.</button>
@@ -398,6 +399,7 @@ async function resolveReview(button) {
       transaction_id: Number(button.dataset.transaction),
       economic_class: button.dataset.class,
       category: button.dataset.category,
+      subcategory: button.dataset.subcategory || "",
       create_rule: true,
     }),
   });

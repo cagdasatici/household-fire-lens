@@ -56,7 +56,6 @@ INVESTMENT_KEYWORDS = (
     "BRAND NEW DAY",
 )
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
-MORTGAGE_DIRECT_DEBIT_IDS = ("NL98ZZZ343342590000",)
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
@@ -74,6 +73,9 @@ RISKY_REVIEW_CLASSES = {"wealth_allocation", "internal_transfer", "reimbursement
 GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANSFER", "OVERSCHRIJVING", "INCASSO"}
 MAX_OPEN_REVIEW_GROUPS = 150
 UNKNOWN_OUTFLOW_REVIEW_THRESHOLD = 250.0
+DIRECT_DEBIT_CREDITOR_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}ZZZ[A-Z0-9]{8,}\b")
+RECURRING_DIRECT_DEBIT_MIN_OCCURRENCES = 6
+RECURRING_DIRECT_DEBIT_AMOUNT_TOLERANCE_PCT = 0.02
 
 
 @dataclass
@@ -87,6 +89,15 @@ class Annotation:
     review_status: str = "auto"
 
 
+@dataclass
+class RecurringDebitGroup:
+    signature_type: str
+    signature_value: str
+    amount: float
+    count: int
+    materiality: float
+
+
 def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
     conn.execute("DELETE FROM transaction_annotations")
     conn.execute("DELETE FROM transaction_links WHERE link_type != 'duplicate'")
@@ -95,6 +106,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
     salary_ids = detect_salary_ids(transactions)
     transfer_pairs = detect_transfer_pairs(transactions)
     refund_pairs = detect_refund_pairs(transactions)
+    recurring_debit_groups = detect_recurring_direct_debits(transactions)
 
     linked_transfer_ids = set()
     for left_id, right_id, amount, kind, explanation in transfer_pairs:
@@ -130,6 +142,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             salary_ids=salary_ids,
             linked_transfer_ids=linked_transfer_ids,
             refund_category_by_id=refund_category_by_id,
+            recurring_debit_groups=recurring_debit_groups,
             user_rules=user_rules,
             entity_hints=entity_hints,
         )
@@ -192,6 +205,7 @@ def classify_transaction(
     salary_ids: Iterable[int],
     linked_transfer_ids: Iterable[int],
     refund_category_by_id: Dict[int, Tuple[str, str]],
+    recurring_debit_groups: Dict[int, RecurringDebitGroup],
     user_rules: List[Dict],
     entity_hints: Optional[Dict[str, EntityHint]] = None,
 ) -> Annotation:
@@ -246,14 +260,14 @@ def classify_transaction(
     if any(keyword in text for keyword in INVESTMENT_KEYWORDS):
         return Annotation("wealth_allocation", "Investments", "", 0.9, "Investment account or broker keyword")
 
-    if amount < 0 and any(identifier in text for identifier in MORTGAGE_DIRECT_DEBIT_IDS):
-        return Annotation("debt_service", "Housing", "Mortgage", 0.95, "Known recurring mortgage direct-debit signature")
-
     if any(keyword in text for keyword in MORTGAGE_KEYWORDS):
         return Annotation("debt_service", "Housing", "Mortgage", 0.92, "Mortgage keyword")
 
     if amount < 0 and any(keyword in text for keyword in BANK_FEE_KEYWORDS):
         return Annotation("household_spend", "Banking and Fees", "", 0.84, "Precise bank package or card fee keyword")
+
+    if amount > 0 and "CREDITRENTE" in text:
+        return Annotation("income", "Interest", "", 0.8, "Credit interest received")
 
     if amount < 0 and any(keyword in text for keyword in BANK_INTEREST_KEYWORDS):
         return Annotation("household_spend", "Banking and Fees", "Interest", 0.78, "Precise bank interest keyword")
@@ -292,6 +306,16 @@ def classify_transaction(
     category, subcategory, confidence, explanation = categorize_merchant(merchant_text)
     if category:
         return Annotation("household_spend", category, subcategory, confidence, explanation)
+
+    if tx["id"] in recurring_debit_groups:
+        group = recurring_debit_groups[tx["id"]]
+        return Annotation(
+            "needs_review",
+            "Uncategorized",
+            "",
+            0.54,
+            f"Recurring direct debit needs one classification; grouped {group.count} payments",
+        )
 
     public_hint = cached_hint_for_merchant(entity_hints or {}, tx.get("normalized_merchant") or "")
     if public_hint and amount < 0:
@@ -459,6 +483,64 @@ def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, floa
     return pairs
 
 
+def extract_direct_debit_id(tx: Dict) -> str:
+    text = tx_text(tx)
+    match = DIRECT_DEBIT_CREDITOR_PATTERN.search(text)
+    return match.group(0) if match else ""
+
+
+def recurring_signature(tx: Dict) -> Tuple[str, str]:
+    creditor_id = extract_direct_debit_id(tx)
+    if creditor_id:
+        return "direct_debit_id", creditor_id
+    counterparty_hash = tx.get("counterparty_account_hash") or ""
+    if counterparty_hash:
+        return "counterparty_account_hash", counterparty_hash
+    return "", ""
+
+
+def recurring_amount_bucket(amount: float) -> float:
+    return round(abs(amount) / 10.0) * 10.0
+
+
+def detect_recurring_direct_debits(transactions: List[Dict]) -> Dict[int, RecurringDebitGroup]:
+    grouped: Dict[Tuple[str, str, float], List[Dict]] = defaultdict(list)
+    for tx in transactions:
+        amount = float(tx["amount"])
+        if tx["is_duplicate"] or amount >= 0:
+            continue
+        signature_type, signature_value = recurring_signature(tx)
+        if not signature_value:
+            continue
+        grouped[(signature_type, signature_value, recurring_amount_bucket(amount))].append(tx)
+
+    result: Dict[int, RecurringDebitGroup] = {}
+    for (signature_type, signature_value, _bucket), items in grouped.items():
+        if len(items) < RECURRING_DIRECT_DEBIT_MIN_OCCURRENCES:
+            continue
+        amounts = [abs(float(tx["amount"])) for tx in items]
+        average = sum(amounts) / len(amounts)
+        if not average:
+            continue
+        mean_abs_deviation = sum(abs(amount - average) for amount in amounts) / len(amounts)
+        if mean_abs_deviation / average > RECURRING_DIRECT_DEBIT_AMOUNT_TOLERANCE_PCT:
+            continue
+        dates = sorted(parse_iso_date(tx["transaction_date"]) for tx in items)
+        monthly_gaps = sum(20 <= (right - left).days <= 45 for left, right in zip(dates, dates[1:]))
+        if monthly_gaps < max(4, len(dates) - 2):
+            continue
+        group = RecurringDebitGroup(
+            signature_type=signature_type,
+            signature_value=signature_value,
+            amount=round(average, 2),
+            count=len(items),
+            materiality=round(sum(amounts), 2),
+        )
+        for tx in items:
+            result[tx["id"]] = group
+    return result
+
+
 def detect_refund_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float, str, str]]:
     outflows = [tx for tx in transactions if float(tx["amount"]) < 0 and not tx["is_duplicate"]]
     inflows = [tx for tx in transactions if float(tx["amount"]) > 0 and not tx["is_duplicate"]]
@@ -511,9 +593,13 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
     transaction_id = conditions.get("transaction_id")
     account_id = conditions.get("account_id")
     counterparty_account_hash = conditions.get("counterparty_account_hash")
+    direct_debit_id = str(conditions.get("direct_debit_id", "")).upper()
     merchant_contains = str(conditions.get("merchant_contains", "")).upper()
     description_contains = str(conditions.get("description_contains", "")).upper()
     min_amount = conditions.get("min_abs_amount")
+    exact_abs_amount = conditions.get("abs_amount")
+    amount_tolerance = conditions.get("amount_tolerance")
+    amount_tolerance_pct = conditions.get("amount_tolerance_pct")
     account_role = conditions.get("account_role")
     direction = conditions.get("direction")
     if transaction_id is not None and int(transaction_id) != int(tx["id"]):
@@ -522,12 +608,21 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
         return False
     if counterparty_account_hash and counterparty_account_hash != tx.get("counterparty_account_hash"):
         return False
+    if direct_debit_id and direct_debit_id != extract_direct_debit_id(tx):
+        return False
     if merchant_contains and merchant_contains not in merchant_text:
         return False
     if description_contains and description_contains not in text:
         return False
     if min_amount is not None and abs(float(tx["amount"])) < float(min_amount):
         return False
+    if exact_abs_amount is not None:
+        expected = float(exact_abs_amount)
+        tolerance = float(amount_tolerance or 0.0)
+        if amount_tolerance_pct is not None:
+            tolerance = max(tolerance, expected * float(amount_tolerance_pct))
+        if abs(abs(float(tx["amount"])) - expected) > tolerance:
+            return False
     if account_role and tx["account_role"] != account_role:
         return False
     if direction and tx["direction"] != direction:
@@ -541,6 +636,8 @@ def rule_is_safely_scoped(conditions: Dict) -> bool:
     if conditions.get("account_id") is not None:
         return True
     if conditions.get("counterparty_account_hash"):
+        return True
+    if conditions.get("direct_debit_id") and conditions.get("abs_amount") is not None:
         return True
     merchant_contains = str(conditions.get("merchant_contains", "")).strip().upper()
     description_contains = str(conditions.get("description_contains", "")).strip().upper()
@@ -598,6 +695,10 @@ def account_is_safe_to_promote_as_investment(conn: sqlite3.Connection, tx: Dict)
 
 
 def review_group_key(row: sqlite3.Row) -> Tuple:
+    if float(row["amount"]) < 0:
+        creditor_id = extract_direct_debit_id(dict(row))
+        if creditor_id:
+            return ("recurring_debit", creditor_id, recurring_amount_bucket(float(row["amount"])))
     counterparty_hash = row["counterparty_account_hash"] or ""
     if counterparty_hash:
         return ("counterparty", counterparty_hash)
@@ -612,6 +713,7 @@ def create_review_items(conn: sqlite3.Connection) -> None:
         """
         SELECT
             nt.id, nt.amount, nt.direction, nt.normalized_merchant, nt.counterparty_account_hash,
+            nt.description, nt.counterparty_name,
             ta.economic_class, ta.confidence, ta.explanation
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
@@ -658,6 +760,9 @@ def create_review_items(conn: sqlite3.Connection) -> None:
             "group_count": group["count"],
             "group_materiality": round(amount, 2),
         }
+        if extract_direct_debit_id(dict(row)):
+            suggested["create_rule"] = True
+            suggested["scope"] = "recurring_direct_debit"
         reason = row["explanation"]
         if group["count"] > 1:
             reason = f"{reason}; grouped {group['count']} similar transactions"
@@ -683,7 +788,7 @@ def create_rule_from_review(
         """
         SELECT
             nt.id, nt.account_id, nt.counterparty_account_hash, nt.normalized_merchant,
-            nt.direction, nt.description, nt.counterparty_name,
+            nt.direction, nt.amount, nt.description, nt.counterparty_name,
             a.role AS account_role, a.institution, a.display_name AS account_name
         FROM normalized_transactions nt
         JOIN accounts a ON a.id = nt.account_id
@@ -698,10 +803,14 @@ def create_rule_from_review(
     counterparty_hash = tx["counterparty_account_hash"] or ""
     text = signal_text(tx_dict)
     name_scope = merchant or "transaction"
+    recurring_conditions = recurring_debit_rule_conditions(tx_dict)
 
     if economic_class == "wealth_allocation" and counterparty_hash:
         conditions = {"counterparty_account_hash": counterparty_hash}
         name_scope = "matching counterparty account"
+    elif recurring_conditions and economic_class in {"debt_service", "household_spend"}:
+        conditions = recurring_conditions
+        name_scope = "recurring direct debit"
     elif economic_class == "wealth_allocation" and account_is_safe_to_promote_as_investment(conn, tx_dict):
         conditions = {"account_id": tx["account_id"]}
         name_scope = f"{tx['account_name']} account"
@@ -736,3 +845,19 @@ def create_rule_from_review(
         (f"Classify {name_scope} as {category}", json_dumps(conditions), json_dumps(actions)),
     )
     return int(cursor.lastrowid)
+
+
+def recurring_debit_rule_conditions(tx: Dict) -> Optional[Dict]:
+    amount = float(tx.get("amount") or 0)
+    if amount >= 0:
+        return None
+    signature_type, signature_value = recurring_signature(tx)
+    if not signature_value:
+        return None
+    conditions = {
+        "direction": tx.get("direction") or "outflow",
+        "abs_amount": round(abs(amount), 2),
+        "amount_tolerance_pct": RECURRING_DIRECT_DEBIT_AMOUNT_TOLERANCE_PCT,
+    }
+    conditions[signature_type] = signature_value
+    return conditions
