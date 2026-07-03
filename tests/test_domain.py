@@ -1415,6 +1415,51 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertGreaterEqual(link["confidence"], 0.9)
         self.assertEqual(review_count, 0)
 
+    def test_empty_reimbursement_counterparty_rule_does_not_swallow_bank_inflows(self):
+        self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (
+                'Classify matching counterparty account as Reimbursements', 50,
+                '{"counterparty_account_hash": "bank-hash", "direction": "inflow"}',
+                '{"economic_class": "reimbursement_pass_through", "category": "Reimbursements", "subcategory": ""}',
+                0.96, 'user', 1
+            )
+            """
+        )
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2021-04-26,Main,Depotbetaling,ABN AMRO BANK NV,bank-hash,20924.00,EUR
+2021-08-23,Main,ABN AMRO BANK NV unknown inflow,ABN AMRO BANK NV,bank-hash,7098.42,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-abn-inflows.csv",
+            csv_text.encode("utf-8"),
+            institution="abn",
+            account_role="checking",
+        )
+        self.conn.execute("UPDATE normalized_transactions SET counterparty_account_hash = 'bank-hash'")
+        self.conn.commit()
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        enabled = self.conn.execute("SELECT enabled FROM classification_rules").fetchone()["enabled"]
+        review_count = self.conn.execute("SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'").fetchone()["count"]
+        self.assertEqual(enabled, 0)
+        self.assertEqual(rows["Depotbetaling"]["economic_class"], "refund")
+        self.assertEqual(rows["Depotbetaling"]["category"], "Home and Furniture")
+        self.assertEqual(rows["ABN AMRO BANK NV unknown inflow"]["economic_class"], "needs_review")
+        self.assertEqual(review_count, 1)
+
     def test_unlinked_large_one_off_income_becomes_review_tier(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-01-29,Main,One-off foundation grant,Example Foundation,4200.00,EUR

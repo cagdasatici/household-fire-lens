@@ -132,6 +132,17 @@ def apply_user_resolution_migrations(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        UPDATE classification_rules
+        SET enabled = 0
+        WHERE enabled = 1
+          AND name = 'Classify matching counterparty account as Reimbursements'
+          AND conditions_json LIKE '%counterparty_account_hash%'
+          AND actions_json LIKE '%Reimbursements%'
+          AND actions_json LIKE '%"subcategory": ""%'
+        """
+    )
+    conn.execute(
+        """
         UPDATE normalized_transactions
         SET is_duplicate = 0
         WHERE is_duplicate = 1
