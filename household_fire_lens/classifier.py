@@ -58,6 +58,8 @@ INVESTMENT_KEYWORDS = (
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
+SALARY_KEYWORDS = ("SALARY", "SALARIS", "PAYROLL", "LOON", "WAGE")
+BONUS_KEYWORDS = ("BONUS", "CASH BONUS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
 REIMBURSEMENT_KEYWORDS = ("REIMBURSEMENT", "VERGOEDING", "EXPENSE REIMBURSEMENT")
 BANK_FEE_KEYWORDS = ("BASISPAKKET", "BETAALPAS", "BETAALPAKKET", "PAKKETKOSTEN", "BANKKOSTEN")
@@ -233,6 +235,8 @@ def classify_transaction(
             )
 
     if tx["id"] in salary_set:
+        if is_cash_bonus_income(tx):
+            return Annotation("income", "Income", "Cash Bonus", 0.94, "February payroll bonus pattern")
         return Annotation("income", "Income", "Salary", 0.94, "Recurring salary pattern: payer/date window/amount similarity")
 
     if amount > 0 and any(keyword in text for keyword in SOCIAL_INSURANCE_KEYWORDS):
@@ -425,28 +429,55 @@ def is_salary_window(day: date) -> bool:
     return 24 <= day.day <= 26
 
 
+def has_salary_keyword(tx: Dict) -> bool:
+    text = signal_text(tx)
+    return any(word in text for word in SALARY_KEYWORDS)
+
+
+def has_bonus_keyword(tx: Dict) -> bool:
+    text = signal_text(tx)
+    return any(word in text for word in BONUS_KEYWORDS)
+
+
+def is_transfer_like_income_candidate(tx: Dict) -> bool:
+    text = signal_text(tx)
+    return (
+        any(keyword in text for keyword in SAVINGS_KEYWORDS)
+        or any(keyword in text for keyword in PAYMENT_REQUEST_KEYWORDS)
+    )
+
+
+def is_cash_bonus_income(tx: Dict) -> bool:
+    amount = float(tx["amount"])
+    tx_date = parse_iso_date(tx["transaction_date"])
+    return amount > 0 and (has_bonus_keyword(tx) or (tx_date.month == 2 and has_salary_keyword(tx) and amount >= 15000))
+
+
 def detect_salary_ids(transactions: List[Dict]) -> set:
     by_merchant: Dict[str, List[Dict]] = defaultdict(list)
     for tx in transactions:
         if tx["is_duplicate"] or float(tx["amount"]) <= 0:
             continue
-        text = signal_text(tx)
         merchant = tx.get("normalized_merchant") or tx.get("counterparty_name") or "UNKNOWN"
         tx_date = parse_iso_date(tx["transaction_date"])
-        if is_salary_window(tx_date) or any(word in text for word in ("SALARY", "SALARIS", "PAYROLL", "LOON")):
+        if has_salary_keyword(tx):
+            by_merchant[merchant].append(tx)
+        elif is_salary_window(tx_date) and float(tx["amount"]) >= 1500 and not is_transfer_like_income_candidate(tx):
             by_merchant[merchant].append(tx)
 
     salary_ids = set()
     for merchant, items in by_merchant.items():
         months = {tx_month(tx) for tx in items}
-        if len(months) < 2 and not any("SALARY" in tx_text(tx) or "SALARIS" in tx_text(tx) for tx in items):
+        if len(months) < 2 and not any(has_salary_keyword(tx) for tx in items):
             continue
         amounts = [float(tx["amount"]) for tx in items]
-        median = sorted(amounts)[len(amounts) // 2]
+        regular_amounts = [amount for tx, amount in zip(items, amounts) if not is_cash_bonus_income(tx)]
+        median_source = regular_amounts or amounts
+        median = sorted(median_source)[len(median_source) // 2]
         for tx in items:
             amount = float(tx["amount"])
             tolerance = max(250.0, abs(median) * 0.12)
-            if abs(amount - median) <= tolerance or any(word in signal_text(tx) for word in ("SALARY", "SALARIS", "PAYROLL", "LOON")):
+            if abs(amount - median) <= tolerance or has_salary_keyword(tx) or is_cash_bonus_income(tx):
                 salary_ids.add(tx["id"])
     return salary_ids
 
@@ -602,6 +633,7 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
     amount_tolerance_pct = conditions.get("amount_tolerance_pct")
     account_role = conditions.get("account_role")
     direction = conditions.get("direction")
+    months = conditions.get("months")
     if transaction_id is not None and int(transaction_id) != int(tx["id"]):
         return False
     if account_id is not None and int(account_id) != int(tx["account_id"]):
@@ -626,6 +658,8 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
     if account_role and tx["account_role"] != account_role:
         return False
     if direction and tx["direction"] != direction:
+        return False
+    if months is not None and int(str(tx["transaction_date"])[5:7]) not in {int(month) for month in months}:
         return False
     return True
 
@@ -806,7 +840,7 @@ def create_rule_from_review(
     recurring_conditions = recurring_debit_rule_conditions(tx_dict)
 
     if economic_class == "wealth_allocation" and counterparty_hash:
-        conditions = {"counterparty_account_hash": counterparty_hash}
+        conditions = {"counterparty_account_hash": counterparty_hash, "direction": tx["direction"]}
         name_scope = "matching counterparty account"
     elif recurring_conditions and economic_class in {"debt_service", "household_spend"}:
         conditions = recurring_conditions

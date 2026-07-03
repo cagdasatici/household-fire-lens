@@ -88,6 +88,42 @@ class DomainTests(unittest.TestCase):
         # Groceries 100 + card 300 + utility 180 + mortgage 1500 - refund 20 - reimbursement 120.
         self.assertEqual(january["household_spend_normalized"], 1940.0)
 
+    def test_split_payroll_and_bonus_are_income_without_pay_window_false_positives(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-24,ING Main,Wage/Salary 202601 ING,Booking.com Payroll,5200.00,EUR
+2026-01-24,ABN Fixed,Wage/Salary 202601 ABN,Booking.com Payroll,2700.00,EUR
+2026-01-24,ING Main,Oranje Spaarrekening from savings,Oranje Spaarrekening,5000.00,EUR
+2026-01-24,ING Main,Tikkie received for party,AAB INZ TIKKIE,6.00,EUR
+2026-02-25,ING Main,Wage/Salary 202602 ING,Booking.com Payroll,40750.00,EUR
+2026-02-25,ABN Fixed,Wage/Salary 202602 ABN,Booking.com Payroll,2700.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-split-payroll.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["Wage/Salary 202601 ING"]["economic_class"], "income")
+        self.assertEqual(rows["Wage/Salary 202601 ING"]["subcategory"], "Salary")
+        self.assertEqual(rows["Wage/Salary 202601 ABN"]["economic_class"], "income")
+        self.assertEqual(rows["Wage/Salary 202601 ABN"]["subcategory"], "Salary")
+        self.assertEqual(rows["Oranje Spaarrekening from savings"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["Tikkie received for party"]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows["Wage/Salary 202602 ING"]["subcategory"], "Cash Bonus")
+        self.assertEqual(rows["Wage/Salary 202602 ABN"]["subcategory"], "Salary")
+
     def test_duplicate_file_does_not_double_count(self):
         first = import_csv(
             self.conn,
@@ -792,6 +828,7 @@ class DomainTests(unittest.TestCase):
         csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
 2026-04-01,Main,Transfer to investment,,NL91ABNA0417164300,-250.00,EUR
 2026-04-02,Main,Another transfer,,NL91ABNA0417164300,-80.00,EUR
+2026-04-03,Main,Transfer back from investment,,NL91ABNA0417164300,80.00,EUR
 """
         import_csv(
             self.conn,
@@ -809,6 +846,7 @@ class DomainTests(unittest.TestCase):
         classify_all(self.conn)
         rule = self.conn.execute("SELECT conditions_json FROM classification_rules WHERE id = ?", (rule_id,)).fetchone()
         self.assertIn("counterparty_account_hash", rule["conditions_json"])
+        self.assertIn("direction", rule["conditions_json"])
         wealth_count = self.conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -817,6 +855,65 @@ class DomainTests(unittest.TestCase):
             """
         ).fetchone()["count"]
         self.assertEqual(wealth_count, 2)
+
+    def test_rsu_income_rule_can_override_inbound_investment_counterparty_by_month(self):
+        self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (
+                'Old broad investment rule', 50,
+                '{"counterparty_account_hash": "stock-plan"}',
+                '{"economic_class": "wealth_allocation", "category": "Investments", "subcategory": ""}',
+                0.96, 'user', 1
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (
+                'RSU vest proceeds', 10,
+                '{"counterparty_account_hash": "stock-plan", "direction": "inflow", "months": [3, 4], "min_abs_amount": 1000}',
+                '{"economic_class": "income", "category": "Equity Compensation", "subcategory": "RSU"}',
+                0.98, 'user', 1
+            )
+            """
+        )
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2026-04-15,Main,Stock plan vest proceeds,Equity Plan,stock-plan,40950.00,EUR
+2026-06-15,Main,Investment withdrawal,Equity Plan,stock-plan,5000.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-rsu-income.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        self.conn.execute(
+            """
+            UPDATE normalized_transactions
+            SET counterparty_account_hash = 'stock-plan'
+            """
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["Stock plan vest proceeds"]["economic_class"], "income")
+        self.assertEqual(rows["Stock plan vest proceeds"]["category"], "Equity Compensation")
+        self.assertEqual(rows["Stock plan vest proceeds"]["subcategory"], "RSU")
+        self.assertEqual(rows["Investment withdrawal"]["economic_class"], "wealth_allocation")
 
     def test_investment_review_promotes_unknown_dedicated_account(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
