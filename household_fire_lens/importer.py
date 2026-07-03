@@ -98,7 +98,7 @@ def import_csv(
             )
             account_id = account_cursor.lastrowid
 
-        merchant = normalize_merchant(tx.counterparty_name or tx.description)
+        merchant = normalize_merchant(tx.counterparty_name) or normalize_merchant(tx.description)
         direction = "inflow" if tx.amount >= 0 else "outflow"
         counterparty_account_hash = None
         if tx.counterparty_account:

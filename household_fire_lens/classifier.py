@@ -811,6 +811,9 @@ def create_rule_from_review(
     elif recurring_conditions and economic_class in {"debt_service", "household_spend"}:
         conditions = recurring_conditions
         name_scope = "recurring direct debit"
+    elif counterparty_hash and not merchant_is_safe_scope(merchant):
+        conditions = {"counterparty_account_hash": counterparty_hash, "direction": tx["direction"]}
+        name_scope = "matching counterparty account"
     elif economic_class == "wealth_allocation" and account_is_safe_to_promote_as_investment(conn, tx_dict):
         conditions = {"account_id": tx["account_id"]}
         name_scope = f"{tx['account_name']} account"
@@ -852,7 +855,7 @@ def recurring_debit_rule_conditions(tx: Dict) -> Optional[Dict]:
     if amount >= 0:
         return None
     signature_type, signature_value = recurring_signature(tx)
-    if not signature_value:
+    if signature_type != "direct_debit_id" or not signature_value:
         return None
     conditions = {
         "direction": tx.get("direction") or "outflow",

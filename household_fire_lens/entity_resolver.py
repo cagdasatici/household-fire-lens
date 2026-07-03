@@ -341,6 +341,30 @@ def store_entity_result(
     )
 
 
+def store_user_entity_mapping(
+    conn: sqlite3.Connection,
+    merchant_name: str,
+    economic_class: str,
+    category: str,
+    subcategory: str = "",
+) -> bool:
+    key = lookup_key(merchant_name)
+    if key in GENERIC_LOOKUP_NAMES or len(key) < 4:
+        return False
+    hint = EntityHint(
+        economic_class=economic_class,
+        category=category,
+        subcategory=subcategory,
+        confidence=1.0,
+        label=merchant_name,
+        description="User review decision",
+        source="user",
+        raw={"source": "review"},
+    )
+    store_entity_result(conn, key, merchant_name, "resolved", hint, hint.raw)
+    return True
+
+
 def candidate_merchants_for_enrichment(conn: sqlite3.Connection, limit: int = 50) -> List[str]:
     rows = conn.execute(
         """

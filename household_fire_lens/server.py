@@ -21,7 +21,7 @@ from .aggregation import (
 )
 from .classifier import classify_all, create_rule_from_review
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
-from .entity_resolver import enrich_candidate_merchants
+from .entity_resolver import enrich_candidate_merchants, store_user_entity_mapping
 from .importer import import_csv
 
 
@@ -200,6 +200,27 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         rule_id = None
         if create_rule:
             rule_id = create_rule_from_review(self.conn, tx_id, economic_class, category, subcategory)
+        tx = fetch_one(
+            self.conn,
+            """
+            SELECT normalized_merchant, counterparty_name
+            FROM normalized_transactions
+            WHERE id = ?
+            """,
+            (tx_id,),
+        )
+        merchant_name = ""
+        if tx:
+            merchant_name = tx.get("normalized_merchant") or tx.get("counterparty_name") or ""
+        mapping_stored = False
+        if merchant_name:
+            mapping_stored = store_user_entity_mapping(
+                self.conn,
+                merchant_name,
+                economic_class,
+                category,
+                subcategory,
+            )
         self.conn.execute(
             """
             INSERT OR REPLACE INTO transaction_annotations (
@@ -216,7 +237,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         self.conn.commit()
         classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)
-        self.send_json({"resolved": True, "rule_id": rule_id})
+        self.send_json({"resolved": True, "rule_id": rule_id, "mapping_stored": mapping_stored})
 
     def handle_create_rule(self) -> None:
         body = self.read_json()

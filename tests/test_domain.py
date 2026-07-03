@@ -5,7 +5,7 @@ from pathlib import Path
 from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
-from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant
+from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
 from household_fire_lens.importer import import_csv
 from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
@@ -283,6 +283,20 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows[2]["subcategory"], "Bank Transfer")
         self.assertEqual(review_count, 0)
 
+    def test_importer_falls_back_to_description_when_counterparty_is_only_iban(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,BCML Enterprise Online Banking Name: BCML Enterprise Description: Music Lessons IBAN: NL35RABO0368686434,NL35RABO0368686434,-300.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-iban-counterparty.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        row = self.conn.execute("SELECT normalized_merchant FROM normalized_transactions").fetchone()
+        self.assertEqual(row["normalized_merchant"], "BCML ENTERPRISE")
+
     def test_uncategorized_outflows_review_only_when_material(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-06-01,Main,Small mystery merchant,Small Mystery,-85.00,EUR
@@ -529,6 +543,116 @@ class DomainTests(unittest.TestCase):
         candidates = candidate_merchants_for_enrichment(self.conn, limit=10)
         self.assertIn("SMALL LOCAL MERCHANT", candidates)
         self.assertIn("LARGE LOCAL MERCHANT", candidates)
+
+    def test_user_review_mapping_persists_as_entity_hint(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,Local shop visit,Local Shop,-85.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-user-entity-map.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        self.assertTrue(
+            store_user_entity_mapping(
+                self.conn,
+                "LOCAL SHOP",
+                "household_spend",
+                "Shopping",
+                "",
+            )
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            """
+            SELECT ta.economic_class, ta.category, ta.explanation
+            FROM transaction_annotations ta
+            """
+        ).fetchone()
+        cache = self.conn.execute(
+            "SELECT source, status, confidence FROM entity_enrichment_cache WHERE lookup_key = 'LOCAL SHOP'"
+        ).fetchone()
+        self.assertEqual(row["economic_class"], "household_spend")
+        self.assertEqual(row["category"], "Shopping")
+        self.assertIn("Free public entity lookup", row["explanation"])
+        self.assertEqual(cache["source"], "user")
+        self.assertEqual(cache["status"], "resolved")
+        self.assertEqual(cache["confidence"], 1.0)
+
+    def test_grouped_review_rule_does_not_resurrect_after_reclassify(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,Recurring mystery debit,Mystery Recurring,-300.00,EUR
+2026-04-02,Main,Recurring mystery debit,Mystery Recurring,-80.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-grouped-review.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = -300"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(self.conn, tx_id, "household_spend", "Shopping")
+        self.conn.commit()
+        classify_all(self.conn)
+        review_count_after = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        rows = self.conn.execute(
+            "SELECT economic_class, category, rule_id FROM transaction_annotations"
+        ).fetchall()
+        self.assertEqual(review_count, 1)
+        self.assertEqual(review_count_after, 0)
+        self.assertEqual({row["category"] for row in rows}, {"Shopping"})
+        self.assertEqual({row["rule_id"] for row in rows}, {rule_id})
+
+    def test_bank_transfer_review_rule_scopes_to_counterparty_group(self):
+        csv_text = """Date,Account,Description,Counterparty,Counterparty account,Amount,Currency
+2026-04-01,Main,Online Banking Name: Music School Description: April lessons,NL35RABO0368686434,NL35RABO0368686434,-300.00,EUR
+2026-04-02,Main,Online Banking Name: Music School Description: May lessons,NL35RABO0368686434,NL35RABO0368686434,-280.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-counterparty-rule.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        self.conn.execute("UPDATE normalized_transactions SET normalized_merchant = ''")
+        self.conn.commit()
+        classify_all(self.conn)
+        review_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = -300"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(self.conn, tx_id, "household_spend", "Education")
+        self.conn.commit()
+        classify_all(self.conn)
+        review_count_after = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'"
+        ).fetchone()["count"]
+        rows = self.conn.execute(
+            "SELECT economic_class, category, rule_id FROM transaction_annotations"
+        ).fetchall()
+        rule = self.conn.execute(
+            "SELECT conditions_json FROM classification_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        self.assertEqual(review_count, 1)
+        self.assertEqual(review_count_after, 0)
+        self.assertEqual({row["category"] for row in rows}, {"Education"})
+        self.assertEqual({row["rule_id"] for row in rows}, {rule_id})
+        self.assertIn("counterparty_account_hash", rule["conditions_json"])
 
     def test_openstreetmap_entity_cache_is_preferred_for_local_places(self):
         def fake_fetch(url):
