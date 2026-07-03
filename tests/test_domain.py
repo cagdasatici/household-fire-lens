@@ -1460,6 +1460,109 @@ TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Househo
         self.assertEqual(rows["ABN AMRO BANK NV unknown inflow"]["economic_class"], "needs_review")
         self.assertEqual(review_count, 1)
 
+    def test_company_reimbursement_review_rule_is_transaction_specific(self):
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2021-04-26,Main,Depotbetaling,ABN AMRO BANK NV,bank-hash,20924.00,EUR
+2021-08-23,Main,ABN AMRO BANK NV company spend reimbursement,ABN AMRO BANK NV,bank-hash,7098.42,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-company-reimbursement.csv",
+            csv_text.encode("utf-8"),
+            institution="abn",
+            account_role="checking",
+        )
+        self.conn.execute("UPDATE normalized_transactions SET counterparty_account_hash = 'bank-hash'")
+        self.conn.commit()
+        classify_all(self.conn)
+        tx_id = self.conn.execute(
+            "SELECT id FROM normalized_transactions WHERE amount = 7098.42"
+        ).fetchone()["id"]
+        rule_id = create_rule_from_review(
+            self.conn,
+            tx_id,
+            "reimbursement_pass_through",
+            "Reimbursements",
+            "Company Expense",
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        rule = self.conn.execute(
+            "SELECT conditions_json, actions_json FROM classification_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        review_count = self.conn.execute("SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'").fetchone()["count"]
+        self.assertIn("transaction_id", rule["conditions_json"])
+        self.assertNotIn("counterparty_account_hash", rule["conditions_json"])
+        self.assertIn("Company Expense", rule["actions_json"])
+        self.assertEqual(rows["Depotbetaling"]["economic_class"], "refund")
+        self.assertEqual(rows["ABN AMRO BANK NV company spend reimbursement"]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows["ABN AMRO BANK NV company spend reimbursement"]["subcategory"], "Company Expense")
+        self.assertEqual(review_count, 0)
+
+    def test_reviewed_empty_reimbursement_rule_is_migrated_to_transaction_scope(self):
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2021-08-23,Main,ABN AMRO BANK NV company spend reimbursement,ABN AMRO BANK NV,bank-hash,7098.42,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-reviewed-company-reimbursement.csv",
+            csv_text.encode("utf-8"),
+            institution="abn",
+            account_role="checking",
+        )
+        tx_id = self.conn.execute("SELECT id FROM normalized_transactions").fetchone()["id"]
+        self.conn.execute("UPDATE normalized_transactions SET counterparty_account_hash = 'bank-hash'")
+        cursor = self.conn.execute(
+            """
+            INSERT INTO classification_rules (
+                name, priority, conditions_json, actions_json, confidence, created_by, enabled
+            ) VALUES (
+                'Classify matching counterparty account as Reimbursements', 50,
+                '{"counterparty_account_hash": "bank-hash", "direction": "inflow"}',
+                '{"economic_class": "reimbursement_pass_through", "category": "Reimbursements", "subcategory": ""}',
+                0.96, 'user', 1
+            )
+            """
+        )
+        rule_id = cursor.lastrowid
+        self.conn.execute(
+            """
+            INSERT INTO transaction_annotations (
+                transaction_id, economic_class, category, subcategory, confidence,
+                rule_id, review_status, digest_tier, explanation
+            ) VALUES (?, 'reimbursement_pass_through', 'Reimbursements', '', 0.99, ?, 'reviewed', 'reviewed', 'User review decision')
+            """,
+            (tx_id, rule_id),
+        )
+        self.conn.commit()
+        classify_all(self.conn)
+        rule = self.conn.execute(
+            "SELECT enabled, conditions_json, actions_json FROM classification_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        annotation = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations WHERE transaction_id = ?",
+            (tx_id,),
+        ).fetchone()
+        review_count = self.conn.execute("SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'").fetchone()["count"]
+        self.assertEqual(rule["enabled"], 1)
+        self.assertIn("transaction_id", rule["conditions_json"])
+        self.assertIn("Company Expense", rule["actions_json"])
+        self.assertEqual(annotation["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(annotation["subcategory"], "Company Expense")
+        self.assertEqual(review_count, 0)
+
     def test_unlinked_large_one_off_income_becomes_review_tier(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-01-29,Main,One-off foundation grant,Example Foundation,4200.00,EUR

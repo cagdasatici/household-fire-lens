@@ -130,6 +130,34 @@ def apply_user_resolution_migrations(conn: sqlite3.Connection) -> None:
           AND actions_json LIKE '%RSU%'
         """
     )
+    reviewed_reimbursement_rules = conn.execute(
+        """
+        SELECT cr.id, cr.actions_json, ta.transaction_id
+        FROM classification_rules cr
+        JOIN transaction_annotations ta ON ta.rule_id = cr.id
+        WHERE cr.enabled = 1
+          AND cr.name = 'Classify matching counterparty account as Reimbursements'
+          AND cr.conditions_json LIKE '%counterparty_account_hash%'
+          AND cr.actions_json LIKE '%Reimbursements%'
+          AND cr.actions_json LIKE '%"subcategory": ""%'
+          AND ta.review_status = 'reviewed'
+        """
+    ).fetchall()
+    for row in reviewed_reimbursement_rules:
+        actions = json_loads(row["actions_json"], {})
+        actions["subcategory"] = actions.get("subcategory") or "Company Expense"
+        conn.execute(
+            """
+            UPDATE classification_rules
+            SET conditions_json = ?, actions_json = ?
+            WHERE id = ?
+            """,
+            (
+                json_dumps({"transaction_id": row["transaction_id"]}),
+                json_dumps(actions),
+                row["id"],
+            ),
+        )
     conn.execute(
         """
         UPDATE classification_rules
@@ -1714,6 +1742,9 @@ def create_rule_from_review(
     if economic_class == "wealth_allocation" and counterparty_hash:
         conditions = {"counterparty_account_hash": counterparty_hash, "direction": tx["direction"]}
         name_scope = "matching counterparty account"
+    elif economic_class == "reimbursement_pass_through":
+        conditions = {"transaction_id": transaction_id}
+        name_scope = f"transaction {transaction_id}"
     elif recurring_conditions and economic_class in {"debt_service", "household_spend"}:
         conditions = recurring_conditions
         name_scope = "recurring direct debit"

@@ -407,7 +407,7 @@ async function loadReview() {
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="debt_service" data-category="Housing" data-subcategory="Mortgage">Mortgage</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="internal_transfer" data-category="Inter-account Transfers">Inter-acct</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="wealth_allocation" data-category="Investments">Investment</button>
-            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements">Reimb.</button>
+            <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements" data-subcategory="Company Expense">Reimb.</button>
           </div>
         </article>
       `;
@@ -417,18 +417,30 @@ async function loadReview() {
 }
 
 async function resolveReview(button) {
-  await api(`/api/review-items/${button.dataset.review}/resolve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      transaction_id: Number(button.dataset.transaction),
-      economic_class: button.dataset.class,
-      category: button.dataset.category,
-      subcategory: button.dataset.subcategory || "",
-      create_rule: true,
-    }),
-  });
-  await refreshAll();
+  const result = document.getElementById("review-result");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Saving...";
+  if (result) result.textContent = "Saving review decision...";
+  try {
+    await api(`/api/review-items/${button.dataset.review}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transaction_id: Number(button.dataset.transaction),
+        economic_class: button.dataset.class,
+        category: button.dataset.category,
+        subcategory: button.dataset.subcategory || "",
+        create_rule: true,
+      }),
+    });
+    if (result) result.textContent = "Review decision saved.";
+    await refreshAll();
+  } catch (error) {
+    if (result) result.textContent = error.message;
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 async function setAmortizationStatus(button) {
@@ -622,6 +634,7 @@ function bindImport() {
 
 document.addEventListener("click", (event) => {
   if (event.target.matches("[data-review]")) {
+    event.preventDefault();
     resolveReview(event.target);
   }
   if (event.target.matches("[data-amortization]")) {

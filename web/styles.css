@@ -387,6 +387,13 @@ th.number {
   gap: 10px;
 }
 
+.inline-status {
+  min-height: 20px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .signal,
 .review-item,
 .rule-item,
