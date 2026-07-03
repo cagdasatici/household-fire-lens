@@ -355,6 +355,8 @@ def candidate_merchants_for_enrichment(conn: sqlite3.Connection, limit: int = 50
           AND (
             ta.economic_class = 'needs_review'
             OR (ta.category = 'Uncategorized' AND ABS(nt.amount) >= 50)
+            OR ta.category = 'Other'
+            OR ta.confidence < 0.70
           )
         GROUP BY nt.normalized_merchant
         ORDER BY materiality DESC, count DESC

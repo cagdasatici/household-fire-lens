@@ -5,7 +5,7 @@ from pathlib import Path
 from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
-from household_fire_lens.entity_resolver import is_lookup_safe, resolve_merchant
+from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant
 from household_fire_lens.importer import import_csv
 from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
@@ -358,6 +358,47 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows["RIVERTY GMBH"]["subcategory"], "Payment Processor")
         self.assertEqual(review_count, 0)
 
+    def test_remediation_golden_fixture_classifies_metric_critical_rows(self):
+        fixture = Path(__file__).parent / "fixtures" / "remediation-golden.csv"
+        import_csv(
+            self.conn,
+            "remediation-golden.csv",
+            fixture.read_bytes(),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+
+        self.assertEqual(rows["iDEAL Name Flatex Bank AG Description CASHORDER756656 Cash Order"]["economic_class"], "wealth_allocation")
+        self.assertEqual(rows["iDEAL Name Flatex Bank AG Description CASHORDER756656 Cash Order"]["category"], "Investments")
+        self.assertEqual(rows["SEPA Incasso Incassant NL98ZZZ343342590000 Naam ABN AMRO BANK NV Machtiging mortgage collection"]["economic_class"], "debt_service")
+        self.assertEqual(rows["SEPA Incasso Incassant NL98ZZZ343342590000 Naam ABN AMRO BANK NV Machtiging mortgage collection"]["subcategory"], "Mortgage")
+        self.assertNotEqual(rows["Comfort Partners B.V. Online Banking Name Comfort Partners B.V. Description home installation invoice"]["category"], "Banking and Fees")
+        self.assertEqual(rows["Comfort Partners B.V. Online Banking Name Comfort Partners B.V. Description home installation invoice"]["economic_class"], "needs_review")
+        self.assertEqual(rows["American Express Europe S.A. Incasso creditcard"]["category"], "Unknown Card Spend")
+        self.assertEqual(rows["ING Incasso Creditcard ICS monthly settlement"]["category"], "Unknown Card Spend")
+        self.assertEqual(rows["Booking.com B.V. SALARY JAN"]["economic_class"], "income")
+        self.assertEqual(rows["Booking.com B.V. Expense reimbursement"]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows["Tikkie betaald aan Friend"]["subcategory"], "Payment Request")
+        self.assertEqual(rows["Tikkie ontvangen van Friend"]["economic_class"], "reimbursement_pass_through")
+        self.assertEqual(rows["VOMAR VOORDEELMARKT AMSTELVEEN payment terminal"]["category"], "Groceries")
+        self.assertEqual(rows["KRUIDVAT AMSTELVEEN payment terminal"]["category"], "Health")
+        self.assertEqual(rows["ACTION AALSMEER payment terminal"]["category"], "Shopping")
+        self.assertEqual(rows["BOL.COM refund"]["economic_class"], "refund")
+        self.assertEqual(rows["BOL.COM refund"]["category"], "Shopping")
+        self.assertEqual(rows["Transfer to own savings"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["Transfer from own checking"]["economic_class"], "internal_transfer")
+
     def test_mollie_payment_processor_keeps_embedded_merchant(self):
         self.assertEqual(
             normalize_merchant("Van Dulken via Stichting Mollie Payments"),
@@ -421,6 +462,23 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(row["economic_class"], "household_spend")
         self.assertEqual(row["category"], "Health")
         self.assertIn("Free public entity lookup", row["explanation"])
+
+    def test_entity_enrichment_candidates_include_other_and_low_confidence_merchants(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-04-01,Main,Small local merchant,Small Local Merchant,-85.00,EUR
+2026-04-02,Main,Large local merchant,Large Local Merchant,-275.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-enrichment-candidates.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        candidates = candidate_merchants_for_enrichment(self.conn, limit=10)
+        self.assertIn("SMALL LOCAL MERCHANT", candidates)
+        self.assertIn("LARGE LOCAL MERCHANT", candidates)
 
     def test_openstreetmap_entity_cache_is_preferred_for_local_places(self):
         def fake_fetch(url):

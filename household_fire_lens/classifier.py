@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ ECONOMIC_CLASSES = {
 
 
 MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
-    (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK"), "Groceries", ""),
+    (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK", "VOMAR", "DEKAMARKT", "HOOGVLIET"), "Groceries", ""),
     (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA"), "Eating Out", ""),
     (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE"), "Holiday", ""),
     (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE"), "Transportation", ""),
@@ -33,19 +34,35 @@ MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
     (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO"), "Housing", "Utilities"),
     (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN "), "Housing", "Insurance"),
     (("MEUBEL", "HENDERS EN HAZEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT"), "Home and Furniture", ""),
-    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN"), "Health", ""),
-    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB"), "Shopping", ""),
+    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER"), "Health", ""),
+    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION"), "Shopping", ""),
     (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP"), "Taxes and Government", ""),
-    (("BANK", "FEE", "KOSTEN", "RENTE"), "Banking and Fees", ""),
 ]
 
 
-INVESTMENT_KEYWORDS = ("IBKR", "INTERACTIVE BROKERS", "DEGIRO", "DE GIRO", "BROKER", "LYNX")
+INVESTMENT_KEYWORDS = (
+    "IBKR",
+    "INTERACTIVE BROKERS",
+    "DEGIRO",
+    "DE GIRO",
+    "FLATEX",
+    "FLATEXDEGIRO",
+    "TRADE REPUBLIC",
+    "BROKER",
+    "LYNX",
+    "SAXO",
+    "BUX",
+    "MEESMAN",
+    "BRAND NEW DAY",
+)
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
+MORTGAGE_DIRECT_DEBIT_IDS = ("NL98ZZZ343342590000",)
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
 REIMBURSEMENT_KEYWORDS = ("REIMBURSEMENT", "VERGOEDING", "EXPENSE REIMBURSEMENT")
+BANK_FEE_KEYWORDS = ("BASISPAKKET", "BETAALPAS", "BETAALPAKKET", "PAKKETKOSTEN", "BANKKOSTEN")
+BANK_INTEREST_KEYWORDS = ("CREDITRENTE", "DEBETRENTE")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
 SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
 CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
@@ -178,7 +195,9 @@ def classify_transaction(
     user_rules: List[Dict],
     entity_hints: Optional[Dict[str, EntityHint]] = None,
 ) -> Annotation:
-    text = tx_text(tx)
+    raw_text = tx_text(tx)
+    text = signal_text(tx)
+    merchant_text = merchant_match_text(tx)
     amount = float(tx["amount"])
     role = tx["account_role"]
     salary_set = set(salary_ids)
@@ -213,7 +232,7 @@ def classify_transaction(
     if tx["id"] in refund_category_by_id or (amount > 0 and any(keyword in text for keyword in REFUND_KEYWORDS)):
         category, subcategory = refund_category_by_id.get(tx["id"], ("", ""))
         if not category:
-            category, subcategory, _, _ = categorize_merchant(text)
+            category, subcategory, _, _ = categorize_merchant(merchant_text)
         return Annotation("refund", category or "Uncategorized", subcategory, 0.84, "Refund reduces original category when matched")
 
     if tx["id"] in transfer_set:
@@ -227,8 +246,17 @@ def classify_transaction(
     if any(keyword in text for keyword in INVESTMENT_KEYWORDS):
         return Annotation("wealth_allocation", "Investments", "", 0.9, "Investment account or broker keyword")
 
+    if amount < 0 and any(identifier in text for identifier in MORTGAGE_DIRECT_DEBIT_IDS):
+        return Annotation("debt_service", "Housing", "Mortgage", 0.95, "Known recurring mortgage direct-debit signature")
+
     if any(keyword in text for keyword in MORTGAGE_KEYWORDS):
         return Annotation("debt_service", "Housing", "Mortgage", 0.92, "Mortgage keyword")
+
+    if amount < 0 and any(keyword in text for keyword in BANK_FEE_KEYWORDS):
+        return Annotation("household_spend", "Banking and Fees", "", 0.84, "Precise bank package or card fee keyword")
+
+    if amount < 0 and any(keyword in text for keyword in BANK_INTEREST_KEYWORDS):
+        return Annotation("household_spend", "Banking and Fees", "Interest", 0.78, "Precise bank interest keyword")
 
     if amount < 0 and any(keyword in text for keyword in CARD_KEYWORDS):
         return Annotation("household_spend", "Unknown Card Spend", "", 0.72, "Credit card settlement; detailed card import optional")
@@ -254,14 +282,14 @@ def classify_transaction(
         return Annotation("reimbursement_pass_through", "Reimbursements", "Other", 0.72, "Reimbursement-like deposit")
 
     if amount > 0:
-        category, subcategory, _, _ = categorize_merchant(text)
+        category, subcategory, _, _ = categorize_merchant(merchant_text)
         if category:
             return Annotation("refund", category, subcategory, 0.7, "Positive merchant credit treated as refund")
 
     if amount > 0:
         return Annotation("needs_review", "Uncategorized", "", 0.45, "Positive transaction is not salary or reimbursement")
 
-    category, subcategory, confidence, explanation = categorize_merchant(text)
+    category, subcategory, confidence, explanation = categorize_merchant(merchant_text)
     if category:
         return Annotation("household_spend", category, subcategory, confidence, explanation)
 
@@ -278,7 +306,7 @@ def classify_transaction(
     if amount < 0 and any(keyword in text for keyword in CARD_TERMINAL_PROCESSOR_KEYWORDS):
         return Annotation("household_spend", "Other", "Payment Processor", 0.62, "Payment processor transaction with extracted merchant")
 
-    if amount < 0 and any(keyword in text for keyword in BANK_TRANSFER_KEYWORDS):
+    if amount < 0 and any(keyword in raw_text for keyword in BANK_TRANSFER_KEYWORDS):
         return Annotation("household_spend", "Other", "Bank Transfer", 0.6, "Unmatched outbound bank transfer")
 
     if abs(amount) >= UNKNOWN_OUTFLOW_REVIEW_THRESHOLD:
@@ -298,6 +326,59 @@ def tx_text(tx: Dict) -> str:
             tx.get("institution"),
         ]
     )
+
+
+BOILERPLATE_PATTERNS = (
+    r"\bONLINE BANKING\b",
+    r"\bSEPA OVERBOEKING\b",
+    r"\bSEPA INCASSO\b",
+    r"\bOVERBOEKING\b",
+    r"\bOVERSCHRIJVING\b",
+    r"\bVALUE DATE\b",
+    r"\bDATE/TIME\b",
+    r"\bTRTP\b",
+    r"\bREMI\b",
+    r"\bEREF\b",
+    r"\bMARF\b",
+    r"\bCSID\b",
+    r"\bNAME\b:?",
+    r"\bNAAM\b:?",
+    r"\bDESCRIPTION\b:?",
+    r"\bOMSCHRIJVING\b:?",
+    r"\bIBAN\b:?",
+    r"\bBIC\b:?",
+    r"\bIDEAL\b",
+)
+
+
+def clean_signal_text(value: str) -> str:
+    text = str(value or "").upper()
+    for pattern in BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def signal_text(tx: Dict) -> str:
+    return clean_signal_text(
+        " ".join(
+            str(part or "")
+            for part in [
+                tx.get("counterparty_name"),
+                tx.get("description"),
+                tx.get("normalized_merchant"),
+                tx.get("reference"),
+            ]
+        )
+    )
+
+
+def merchant_match_text(tx: Dict) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        " ".join(str(part or "").upper() for part in [tx.get("counterparty_name"), tx.get("normalized_merchant")]),
+    ).strip()
 
 
 def tx_month(tx: Dict) -> str:
@@ -325,7 +406,7 @@ def detect_salary_ids(transactions: List[Dict]) -> set:
     for tx in transactions:
         if tx["is_duplicate"] or float(tx["amount"]) <= 0:
             continue
-        text = tx_text(tx)
+        text = signal_text(tx)
         merchant = tx.get("normalized_merchant") or tx.get("counterparty_name") or "UNKNOWN"
         tx_date = parse_iso_date(tx["transaction_date"])
         if is_salary_window(tx_date) or any(word in text for word in ("SALARY", "SALARIS", "PAYROLL", "LOON")):
@@ -341,7 +422,7 @@ def detect_salary_ids(transactions: List[Dict]) -> set:
         for tx in items:
             amount = float(tx["amount"])
             tolerance = max(250.0, abs(median) * 0.12)
-            if abs(amount - median) <= tolerance or any(word in tx_text(tx) for word in ("SALARY", "SALARIS", "PAYROLL", "LOON")):
+            if abs(amount - median) <= tolerance or any(word in signal_text(tx) for word in ("SALARY", "SALARIS", "PAYROLL", "LOON")):
                 salary_ids.add(tx["id"])
     return salary_ids
 
@@ -364,7 +445,7 @@ def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, floa
             if abs((left_date - right_date).days) > 3:
                 continue
             roles = {left["account_role"], right["account_role"]}
-            texts = tx_text(left) + " " + tx_text(right)
+            texts = signal_text(left) + " " + signal_text(right)
             if "investment" in roles or any(keyword in texts for keyword in INVESTMENT_KEYWORDS):
                 kind = "transfer_pair"
                 explanation = "Matched equal/opposite investment transfer across own accounts"
@@ -383,7 +464,7 @@ def detect_refund_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float,
     inflows = [tx for tx in transactions if float(tx["amount"]) > 0 and not tx["is_duplicate"]]
     pairs = []
     for refund in inflows:
-        refund_text = tx_text(refund)
+        refund_text = signal_text(refund)
         if not any(keyword in refund_text for keyword in REFUND_KEYWORDS):
             continue
         refund_date = parse_iso_date(refund["transaction_date"])
@@ -403,7 +484,7 @@ def detect_refund_pairs(transactions: List[Dict]) -> List[Tuple[int, int, float,
             best = original
             break
         if best:
-            category, subcategory, _, _ = categorize_merchant(tx_text(best))
+            category, subcategory, _, _ = categorize_merchant(merchant_match_text(best))
             pairs.append((refund["id"], best["id"], float(refund["amount"]), category or "Uncategorized", subcategory))
     return pairs
 
@@ -425,7 +506,8 @@ def categorize_merchant(text: str) -> Tuple[str, str, float, str]:
 def rule_matches(tx: Dict, conditions: Dict) -> bool:
     if not rule_is_safely_scoped(conditions):
         return False
-    text = tx_text(tx)
+    text = signal_text(tx)
+    merchant_text = merchant_match_text(tx)
     transaction_id = conditions.get("transaction_id")
     account_id = conditions.get("account_id")
     counterparty_account_hash = conditions.get("counterparty_account_hash")
@@ -440,7 +522,7 @@ def rule_matches(tx: Dict, conditions: Dict) -> bool:
         return False
     if counterparty_account_hash and counterparty_account_hash != tx.get("counterparty_account_hash"):
         return False
-    if merchant_contains and merchant_contains not in text:
+    if merchant_contains and merchant_contains not in merchant_text:
         return False
     if description_contains and description_contains not in text:
         return False
@@ -614,7 +696,7 @@ def create_rule_from_review(
     tx_dict = dict(tx)
     merchant = tx["normalized_merchant"] or ""
     counterparty_hash = tx["counterparty_account_hash"] or ""
-    text = tx_text(tx_dict)
+    text = signal_text(tx_dict)
     name_scope = merchant or "transaction"
 
     if economic_class == "wealth_allocation" and counterparty_hash:

@@ -1,0 +1,17 @@
+Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2026-01-03,Main,iDEAL Name Flatex Bank AG Description CASHORDER756656 Cash Order,Flatex Bank AG,NL91FLATEX00000001,-2500.00,EUR
+2026-01-04,Main,SEPA Incasso Incassant NL98ZZZ343342590000 Naam ABN AMRO BANK NV Machtiging mortgage collection,ABN AMRO BANK NV,NL91ABNA00000001,-1815.31,EUR
+2026-01-05,Main,Comfort Partners B.V. Online Banking Name Comfort Partners B.V. Description home installation invoice,Comfort Partners B.V.,NL91RABO00000001,-14972.00,EUR
+2026-01-06,Main,American Express Europe S.A. Incasso creditcard,American Express Europe S.A.,NL91AMEX00000001,-3000.00,EUR
+2026-01-07,Main,ING Incasso Creditcard ICS monthly settlement,International Card Services BV,NL91ICS000000001,-1200.00,EUR
+2026-01-26,Main,Booking.com B.V. SALARY JAN,Booking.com B.V.,NL00BOOK0000000000,5000.00,EUR
+2026-01-12,Main,Booking.com B.V. Expense reimbursement,Booking.com B.V.,NL00BOOK0000000000,180.00,EUR
+2026-01-13,Main,Tikkie betaald aan Friend,,,-42.50,EUR
+2026-01-14,Main,Tikkie ontvangen van Friend,,,42.50,EUR
+2026-01-15,Main,VOMAR VOORDEELMARKT AMSTELVEEN payment terminal,Vomar Voordeelmarkt,,-53.30,EUR
+2026-01-16,Main,KRUIDVAT AMSTELVEEN payment terminal,Kruidvat,,-18.70,EUR
+2026-01-17,Main,ACTION AALSMEER payment terminal,Action,,-27.95,EUR
+2026-01-18,Main,BOL.COM order,Bol.com,,-100.00,EUR
+2026-01-20,Main,BOL.COM refund,Bol.com,,100.00,EUR
+2026-01-21,Main,Transfer to own savings,Own Savings,NL91SAVE00000001,-500.00,EUR
+2026-01-22,Savings,Transfer from own checking,Own Checking,NL91MAIN00000001,500.00,EUR
