@@ -18,13 +18,13 @@ The first implementation is deliberately local and dependency-light: Python stan
 ## Quick Start
 
 ```bash
-python3 -m household_fire_lens.server
+python3 -m household_fire_lens
 ```
 
 Then open:
 
 ```text
-http://127.0.0.1:8765
+http://127.0.0.1:8787
 ```
 
 By default the app creates a local SQLite database at:
@@ -34,6 +34,16 @@ By default the app creates a local SQLite database at:
 ```
 
 This path is ignored by git.
+
+## Import Archive
+
+Put private exports under the ignored `input_documents/` archive, using folder names as account hints, then run:
+
+```bash
+python3 -m household_fire_lens --import-dir input_documents/
+```
+
+Supported CSV/TAB lanes include ING checking, ING savings, ABN AMRO TAB/CSV, DeGiro, IBKR activity statements, Wise transaction history, and Amex CSV. PDFs are recorded as unsupported for now so the archive is auditable without silently pretending those statements were processed.
 
 ## Tests
 
@@ -45,16 +55,16 @@ python3 -m unittest
 
 This repo is designed so personal files do not get committed accidentally. The `.gitignore` excludes bank exports, investment statements, PDFs, spreadsheets, upload folders, local databases, secrets, and common ABN/ING/DeGiro/IBKR/Booking.com filename patterns.
 
-Raw data stays local. The app does not call external services.
+Raw data stays local and is never uploaded by the import pipeline. The importer may download free ECB reference FX rates for non-EUR rows, and the dashboard has an explicit manual merchant-lookup action that calls public entity APIs only when you press it.
 
 ## Project Status
 
 Implemented MVP:
 
 - SQLite schema
-- CSV parser profiles for common ING, ABN AMRO, IBKR, DeGiro, and generic exports
-- headerless ABN `.TAB` exports and ING `Amount (EUR)` CSV exports
-- import and deduplication pipeline
+- CSV parser profiles for common ING, ING savings, ABN AMRO, Wise, Amex, IBKR, DeGiro, and generic exports
+- headerless ABN `.TAB` exports, ING `Amount (EUR)` exports, Wise multi-currency rows, IBKR activity statements, and Amex Dutch CSV exports
+- recursive archive import, unsupported-file audit records, import deduplication, ECB FX conversion, and imported balance observations
 - account roles
 - classification engine
 - salary, transfer, investment, mortgage, Booking.com reimbursement, card settlement, refund, and merchant category handling

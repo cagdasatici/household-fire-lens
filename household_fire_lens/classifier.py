@@ -58,6 +58,7 @@ INVESTMENT_KEYWORDS = (
 MORTGAGE_KEYWORDS = ("MORTGAGE", "HYPOTHEEK", "HYPOTHECAIR", "HYPOTHEEKRENTE")
 BOOKING_REIMBURSEMENT_KEYWORDS = ("BOOKING.COM", "BOOKING COM", "BOOKINGCOM", "BOOKING")
 CARD_KEYWORDS = ("CREDITCARD", "CREDIT CARD", "MASTERCARD", "VISA", "ICS", "AMEX", "AMERICAN EXPRESS")
+CREDIT_CARD_PAYMENT_KEYWORDS = ("HARTELIJK BEDANKT VOOR UW BETALING", "THANK YOU FOR YOUR PAYMENT", "BETALING", "PAYMENT RECEIVED")
 SALARY_KEYWORDS = ("SALARY", "SALARIS", "PAYROLL", "LOON", "WAGE")
 BONUS_KEYWORDS = ("BONUS", "CASH BONUS")
 REFUND_KEYWORDS = ("REFUND", "RETOUR", "TERUGBETALING", "REVERSAL", "STORNO", "CREDITNOTA", "CASHBACK", "TERUGGAAF", "TERUGBOEKING", "RESTITUTIE")
@@ -66,6 +67,7 @@ SUBSIDY_LINK_KEYWORDS = ("RVO", "ISDE", "SUBSIDIE", "SUBSIDY", "CLAIM", "UITKERI
 BANK_FEE_KEYWORDS = ("BASISPAKKET", "BETAALPAS", "BETAALPAKKET", "PAKKETKOSTEN", "BANKKOSTEN")
 BANK_INTEREST_KEYWORDS = ("CREDITRENTE", "DEBETRENTE")
 SAVINGS_KEYWORDS = ("SAVINGS", "SPAAR", "EIGEN REKENING", "OWN ACCOUNT")
+CURRENT_ACCOUNT_TRANSFER_KEYWORDS = ("TRANSFER FROM CURRENT ACCOUNT", "TRANSFER TO CURRENT ACCOUNT")
 SOCIAL_INSURANCE_KEYWORDS = ("SOCIALE VERZEKERINGSBANK", "SVB")
 CHILD_BENEFIT_KEYWORDS = ("KINDERBIJSLAG", "KINDER", "CHILD BENEFIT")
 CASH_WITHDRAWAL_KEYWORDS = ("GELDMAAT", "ATM", "CASH WITHDRAWAL", "CONTANTOPNAME", "GELDAUTOMAAT")
@@ -202,9 +204,14 @@ def load_transactions(conn: sqlite3.Connection) -> List[Dict]:
             nt.*,
             a.role AS account_role,
             a.institution,
-            a.display_name AS account_name
+            a.display_name AS account_name,
+            tad.native_amount,
+            tad.native_currency,
+            tad.source_currency,
+            tad.target_currency
         FROM normalized_transactions nt
         JOIN accounts a ON a.id = nt.account_id
+        LEFT JOIN transaction_amount_details tad ON tad.transaction_id = nt.id
         ORDER BY nt.transaction_date, nt.id
         """
     ).fetchall()
@@ -238,6 +245,7 @@ def classify_transaction(
     merchant_text = merchant_match_text(tx)
     amount = float(tx["amount"])
     role = tx["account_role"]
+    native_currency = (tx.get("native_currency") or tx.get("currency") or "EUR").upper()
     salary_set = set(salary_ids)
     transfer_set = set(linked_transfer_ids)
 
@@ -260,6 +268,27 @@ def classify_transaction(
         if is_cash_bonus_income(tx):
             return Annotation("income", "Income", "Cash Bonus", 0.94, "February payroll bonus pattern")
         return Annotation("income", "Income", "Salary", 0.94, "Recurring salary pattern: payer/date window/amount similarity")
+
+    if role == "credit_card":
+        if amount > 0 and any(keyword in text for keyword in CREDIT_CARD_PAYMENT_KEYWORDS):
+            return Annotation("internal_transfer", "Card Settlement", "Amex", 0.86, "Credit-card payment credit imported from card statement")
+        return Annotation("ignore_noise", "Credit Card Detail", "Pending Settlement Pairing", 0.9, "Card detail imported; R5 settlement pairing will activate spend lines")
+
+    if role == "wise":
+        if amount < 0 and "SHARES" in text:
+            return Annotation("wealth_allocation", "Investments", "RSU Settlement", 0.84, "Wise RSU share-booking outflow")
+        if amount < 0 and any(keyword in text for keyword in INVESTMENT_KEYWORDS):
+            return Annotation("wealth_allocation", "Investments", "Wise to Broker", 0.9, "Wise transfer to broker")
+        if amount > 0 and native_currency != "EUR" and amount >= 1000:
+            return Annotation("income", "Equity Compensation", "RSU", 0.82, "Large non-EUR Wise inflow treated as RSU proceeds pending vest-schedule check")
+        if amount > 0 and native_currency == "EUR":
+            return Annotation("internal_transfer", "Inter-account Transfers", "Wise", 0.84, "Wise EUR top-up from own account")
+
+    if role == "savings":
+        if any(keyword in text for keyword in CURRENT_ACCOUNT_TRANSFER_KEYWORDS):
+            return Annotation("internal_transfer", "Inter-account Transfers", "Savings", 0.92, "Savings account transfer to or from current account")
+        if amount > 0 and "INTEREST" in text:
+            return Annotation("income", "Interest", "Savings", 0.9, "Savings account interest received")
 
     if amount > 0 and any(keyword in text for keyword in SOCIAL_INSURANCE_KEYWORDS):
         if any(keyword in text for keyword in CHILD_BENEFIT_KEYWORDS):
@@ -526,7 +555,7 @@ def detect_transfer_pairs(transactions: List[Dict]) -> List[Tuple[int, int, floa
             if "investment" in roles or any(keyword in texts for keyword in INVESTMENT_KEYWORDS):
                 kind = "transfer_pair"
                 explanation = "Matched equal/opposite investment transfer across own accounts"
-            elif roles <= {"checking", "savings", "unknown"} or any(keyword in texts for keyword in SAVINGS_KEYWORDS):
+            elif roles <= {"checking", "savings", "wise", "unknown"} or any(keyword in texts for keyword in SAVINGS_KEYWORDS):
                 kind = "transfer_pair"
                 explanation = "Matched equal/opposite transfer across own accounts"
             else:

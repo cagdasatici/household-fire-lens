@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect_database(path: str) -> sqlite3.Connection:
@@ -38,7 +38,8 @@ def migrate(conn: sqlite3.Connection) -> None:
             statement_year INTEGER,
             parser_version TEXT NOT NULL,
             row_count INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'imported'
+            status TEXT NOT NULL DEFAULT 'imported',
+            error_message TEXT
         );
 
         CREATE TABLE IF NOT EXISTS accounts (
@@ -123,6 +124,44 @@ def migrate(conn: sqlite3.Connection) -> None:
             explanation TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(link_type, from_transaction_id, to_transaction_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS balance_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id),
+            source_file_id INTEGER REFERENCES source_files(id),
+            transaction_id INTEGER REFERENCES normalized_transactions(id),
+            observation_date TEXT NOT NULL,
+            balance_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'EUR',
+            confidence REAL NOT NULL DEFAULT 0.95,
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(account_id, transaction_id, balance_type)
+        );
+
+        CREATE TABLE IF NOT EXISTS transaction_amount_details (
+            transaction_id INTEGER PRIMARY KEY REFERENCES normalized_transactions(id),
+            native_amount REAL,
+            native_currency TEXT,
+            source_amount REAL,
+            source_currency TEXT,
+            target_amount REAL,
+            target_currency TEXT,
+            exchange_rate REAL,
+            converted_amount REAL,
+            converted_currency TEXT NOT NULL DEFAULT 'EUR',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS fx_rates (
+            rate_date TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            eur_per_unit REAL NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (rate_date, currency)
         );
 
         CREATE TABLE IF NOT EXISTS known_counterparties (
@@ -214,8 +253,11 @@ def migrate(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_entity_enrichment_status ON entity_enrichment_cache(status);
         CREATE INDEX IF NOT EXISTS idx_entity_enrichment_category ON entity_enrichment_cache(category);
         CREATE INDEX IF NOT EXISTS idx_expected_income_status ON expected_income_events(status, month);
+        CREATE INDEX IF NOT EXISTS idx_balance_observations_account_date ON balance_observations(account_id, observation_date);
+        CREATE INDEX IF NOT EXISTS idx_fx_rates_currency_date ON fx_rates(currency, rate_date);
         """
     )
+    ensure_column(conn, "source_files", "error_message", "TEXT")
     ensure_column(conn, "accounts", "owner", "TEXT NOT NULL DEFAULT 'self'")
     ensure_column(conn, "transaction_annotations", "digest_tier", "TEXT NOT NULL DEFAULT 'auto_visible'")
     ensure_column(conn, "review_items", "expected_event_id", "INTEGER REFERENCES expected_income_events(id)")

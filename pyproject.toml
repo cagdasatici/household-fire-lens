@@ -9,7 +9,7 @@ authors = [{ name = "Household FIRE Lens contributors" }]
 dependencies = []
 
 [project.scripts]
-household-fire-lens = "household_fire_lens.server:main"
+household-fire-lens = "household_fire_lens.cli:main"
 
 [tool.setuptools]
 packages = ["household_fire_lens"]

@@ -6,7 +6,7 @@ from household_fire_lens.aggregation import fire_snapshot, optimization_insights
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
-from household_fire_lens.importer import import_csv
+from household_fire_lens.importer import import_csv, import_directory
 from household_fire_lens.parsers import normalize_merchant, parse_transactions
 
 
@@ -42,6 +42,39 @@ ING_AMOUNT_EUR_CSV = """Date,Name / Description,Account,Counterparty,Code,Debit/
 
 ING_DESCRIPTION_IBAN_CSV = """Date,Name / Description,Account,Counterparty,Code,Debit/credit,Amount (EUR),Transaction type,Notifications,Resulting balance,Tag
 2026-07-02,Own Transfer,NL00INGB0000000000,,GT,Debit,"1500,00",Transfer,"Account: NL00INGB0000000000 Name: Me IBAN: NL91ABNA0417164300 Value date: 02/07/2026","8500,00",
+"""
+
+
+ING_SAVINGS_CSV = """Date;Description;Account;Account name;Counterparty;Debit/credit;Amount;Currency;Transaction type;Notifications;Resulting balance
+2026-01-02;Transfer from current account NL00INGB0000000000;C 000-00000;savings account;NL00INGB0000000000;Credit;2500,00;EUR;Deposit;;60000,00
+2026-01-03;Transfer to current account NL00INGB0000000000;C 000-00000;savings account;NL00INGB0000000000;Debit;1000,00;EUR;Withdrawal;;59000,00
+"""
+
+
+WISE_CSV = """ID,Status,Direction,Created on,Finished on,Source fee amount,Source fee currency,Target fee amount,Target fee currency,Source name,Source amount (after fees),Source currency,Target name,Target amount (after fees),Target currency,Exchange rate,Reference,Batch,Created by,Category,Note
+TRANSFER-1,COMPLETED,IN,2026-01-02 10:00:00,2026-01-02 10:01:00,0,EUR,,,Household User,2500.00,EUR,Household User,2500.00,EUR,1.0,,batch,user,Money added,
+TRANSFER-2,COMPLETED,OUT,2026-01-03 10:00:00,2026-01-03 10:01:00,0,EUR,,,Household User,2500.00,EUR,Interactive Brokers Ireland Limited,2500.00,EUR,1.0,broker,batch,user,General,
+TRANSFER-3,CANCELLED,OUT,2026-01-04 10:00:00,2026-01-04 10:01:00,0,EUR,,,Household User,10.00,EUR,Someone,10.00,EUR,1.0,,batch,user,General,
+"""
+
+
+AMEX_CSV = """Datum,Omschrijving,Kaartlid,Rekening #,Bedrag,Aanvullende informatie,Vermeld op uw rekeningoverzicht als,Adres,Plaats,Postcode,Land,Referentie
+06/01/2026,HARTELIJK BEDANKT VOOR UW BETALING,HOUSEHOLD USER,-91008,"-2434,75",,HARTELIJK BEDANKT VOOR UW BETALING,,,,,'100'
+05/25/2026,OPENAI *CHATGPT SUBSCR  DUBLIN,HOUSEHOLD USER,-91008,"23,00",,OPENAI *CHATGPT SUBSCR  DUBLIN,,DUBLIN,,IRELAND,'101'
+"""
+
+
+IBKR_ACTIVITY_CSV = """Statement,Header,Field Name,Field Value
+Statement,Data,Title,Activity Statement
+Statement,Data,Period,"February 3, 2026 - July 1, 2026"
+Account Information,Header,Field Name,Field Value
+Account Information,Data,Account,U0000000
+Net Asset Value,Header,Asset Class,Prior Total,Current Long,Current Short,Current Total,Change
+Net Asset Value,Data,Total,280449.38,603781.64,0,603781.64,323332.26
+Deposits & Withdrawals,Header,Currency,Settle Date,Description,Amount
+Deposits & Withdrawals,Data,EUR,2026-02-18,Electronic Fund Transfer,30000
+Deposits & Withdrawals,Data,USD,2026-03-24,Electronic Fund Transfer,22807.79
+Deposits & Withdrawals,Data,Total,,,52807.79
 """
 
 
@@ -798,6 +831,168 @@ class DomainTests(unittest.TestCase):
         )
         self.assertEqual(institution, "ing")
         self.assertEqual(parsed[0].counterparty_account, "NL91ABNA0417164300")
+
+    def test_ing_savings_resulting_balance_is_persisted(self):
+        import_csv(
+            self.conn,
+            "ING_savings_synthetic_2026.csv",
+            ING_SAVINGS_CSV.encode("utf-8"),
+            institution="ing",
+            account_role="savings",
+            account_hint="ING Savings",
+        )
+        observations = self.conn.execute(
+            """
+            SELECT bo.balance_type, bo.amount, a.role
+            FROM balance_observations bo
+            JOIN accounts a ON a.id = bo.account_id
+            ORDER BY bo.observation_date, bo.id
+            """
+        ).fetchall()
+        self.assertEqual(len(observations), 2)
+        self.assertEqual({row["balance_type"] for row in observations}, {"resulting"})
+        self.assertEqual([row["amount"] for row in observations], [60000.0, 59000.0])
+        self.assertEqual({row["role"] for row in observations}, {"savings"})
+
+    def test_ing_savings_current_account_transfers_and_interest_are_auto_classified(self):
+        csv_text = """Date;Description;Account;Account name;Counterparty;Debit/credit;Amount;Currency;Transaction type;Notifications;Resulting balance
+2026-01-01;Interest Interest;C 000-00000;savings account;;Credit;100,00;EUR;Interest;;60100,00
+2026-01-02;Transfer from current account NL00INGB0000000000;C 000-00000;savings account;NL00INGB0000000000;Credit;2500,00;EUR;Deposit;;62600,00
+2026-01-03;Transfer to current account NL00INGB0000000000;C 000-00000;savings account;NL00INGB0000000000;Debit;1000,00;EUR;Withdrawal;;61600,00
+"""
+        import_csv(
+            self.conn,
+            "ING_savings_current_account.csv",
+            csv_text.encode("utf-8"),
+            institution="ing",
+            account_role="savings",
+            account_hint="ING Savings",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["description"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.description, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["Interest Interest Interest"]["economic_class"], "income")
+        self.assertEqual(rows["Interest Interest Interest"]["category"], "Interest")
+        self.assertEqual(rows["Interest Interest Interest"]["subcategory"], "Savings")
+        self.assertEqual(rows["Deposit Transfer from current account NL00INGB0000000000"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["Deposit Transfer from current account NL00INGB0000000000"]["subcategory"], "Savings")
+        self.assertEqual(rows["Withdrawal Transfer to current account NL00INGB0000000000"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["Withdrawal Transfer to current account NL00INGB0000000000"]["subcategory"], "Savings")
+        review_count = self.conn.execute("SELECT COUNT(*) AS count FROM review_items WHERE status = 'open'").fetchone()["count"]
+        self.assertEqual(review_count, 0)
+
+    def test_wise_parser_skips_cancelled_and_classifies_bridge_rows(self):
+        import_csv(
+            self.conn,
+            "wise_2026_transaction-history.csv",
+            WISE_CSV.encode("utf-8"),
+            institution="wise",
+            account_role="wise",
+            account_hint="Wise",
+        )
+        classify_all(self.conn)
+        rows = self.conn.execute(
+            """
+            SELECT nt.amount, nt.currency, nt.normalized_merchant, ta.economic_class, ta.category, ta.subcategory
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            ORDER BY nt.transaction_date, nt.id
+            """
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["amount"], 2500.0)
+        self.assertEqual(rows[0]["economic_class"], "internal_transfer")
+        self.assertEqual(rows[0]["subcategory"], "Wise")
+        self.assertEqual(rows[1]["amount"], -2500.0)
+        self.assertEqual(rows[1]["economic_class"], "wealth_allocation")
+        self.assertEqual(rows[1]["subcategory"], "Wise to Broker")
+
+    def test_wise_rsu_share_booking_outflow_is_wealth_allocation(self):
+        csv_text = """ID,Status,Direction,Created on,Finished on,Source fee amount,Source fee currency,Target fee amount,Target fee currency,Source name,Source amount (after fees),Source currency,Target name,Target amount (after fees),Target currency,Exchange rate,Reference,Batch,Created by,Category,Note
+TRANSFER-1,COMPLETED,OUT,2026-03-09 10:00:00,2026-03-09 10:01:00,0,EUR,,,Household User,14755.95,EUR,Household User,14755.95,EUR,1.0,Employer equity - 6 shares,batch,user,General,
+"""
+        import_csv(
+            self.conn,
+            "wise-rsu-share-booking.csv",
+            csv_text.encode("utf-8"),
+            institution="wise",
+            account_role="wise",
+            account_hint="Wise",
+        )
+        classify_all(self.conn)
+        row = self.conn.execute(
+            "SELECT economic_class, category, subcategory FROM transaction_annotations"
+        ).fetchone()
+        self.assertEqual(row["economic_class"], "wealth_allocation")
+        self.assertEqual(row["category"], "Investments")
+        self.assertEqual(row["subcategory"], "RSU Settlement")
+
+    def test_amex_parser_flips_card_statement_signs_and_defers_spend(self):
+        import_csv(
+            self.conn,
+            "activity.csv",
+            AMEX_CSV.encode("utf-8"),
+            institution="amex",
+            account_role="credit_card",
+            account_hint="Amex",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row
+            for row in self.conn.execute(
+                """
+                SELECT nt.amount, nt.normalized_merchant, ta.economic_class, ta.category, ta.subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["HARTELIJK BEDANKT VOOR UW BETALING"]["amount"], 2434.75)
+        self.assertEqual(rows["HARTELIJK BEDANKT VOOR UW BETALING"]["economic_class"], "internal_transfer")
+        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["amount"], -23.0)
+        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["economic_class"], "ignore_noise")
+        self.assertEqual(rows["OPENAI CHATGPT SUBSCR DUBLIN"]["subcategory"], "Pending Settlement Pairing")
+
+    def test_ibkr_activity_statement_parses_deposit_withdrawal_section(self):
+        institution, parsed = parse_transactions(
+            "U0000000_20260203_20260701.csv",
+            IBKR_ACTIVITY_CSV.encode("utf-8"),
+            institution="ibkr",
+            account_hint="IBKR",
+        )
+        self.assertEqual(institution, "ibkr")
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0].transaction_date, "2026-02-18")
+        self.assertEqual(parsed[0].amount, 30000.0)
+        self.assertEqual(parsed[0].currency, "EUR")
+        self.assertEqual(parsed[1].amount, 22807.79)
+        self.assertEqual(parsed[1].currency, "USD")
+        self.assertEqual(parsed[1].native_currency, "USD")
+
+    def test_import_directory_maps_folders_and_records_unsupported_files(self):
+        root = Path(self.temp_dir.name) / "input_documents"
+        (root / "ING_savings").mkdir(parents=True)
+        (root / "Wise").mkdir()
+        (root / "ING_cc").mkdir()
+        (root / "ING_savings" / "savings.csv").write_text(ING_SAVINGS_CSV, encoding="utf-8")
+        (root / "Wise" / "wise.csv").write_text(WISE_CSV, encoding="utf-8")
+        (root / "ING_cc" / "Afschrift.pdf").write_bytes(b"%PDF-1.4 placeholder")
+        report = import_directory(self.conn, str(root))
+        self.assertEqual(report["status_counts"]["imported"], 2)
+        self.assertEqual(report["status_counts"]["unsupported"], 1)
+        unsupported = self.conn.execute(
+            "SELECT status, error_message FROM source_files WHERE filename LIKE '%Afschrift.pdf'"
+        ).fetchone()
+        self.assertEqual(unsupported["status"], "unsupported")
+        self.assertIn("Unsupported file extension", unsupported["error_message"])
 
     def test_unscoped_review_rule_does_not_classify_everything(self):
         self.import_and_classify()

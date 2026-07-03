@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-PARSER_VERSION = "2026.07.02.4"
+PARSER_VERSION = "2026.07.03.1"
 IBAN_PATTERN = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
 IBAN_TEXT_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?:[\s-]?[A-Z0-9]){10,30}\b")
 PAYMENT_PROCESSOR_PATTERNS = (
@@ -108,9 +108,23 @@ class ParsedTransaction:
     counterparty_account: str
     description: str
     reference: str
+    opening_balance: Optional[float] = None
+    closing_balance: Optional[float] = None
+    resulting_balance: Optional[float] = None
+    native_amount: Optional[float] = None
+    native_currency: Optional[str] = None
+    source_amount: Optional[float] = None
+    source_currency: Optional[str] = None
+    target_amount: Optional[float] = None
+    target_currency: Optional[str] = None
+    exchange_rate: Optional[float] = None
 
 
 class ParseError(ValueError):
+    pass
+
+
+class SkipRow(Exception):
     pass
 
 
@@ -232,7 +246,7 @@ def read_csv(content: bytes) -> Tuple[List[str], List[Dict[str, str]]]:
         original_headers = first_row
         data_rows = all_rows[1:]
 
-    normalized_headers = [normalize_header(header or "") for header in original_headers]
+    normalized_headers = normalize_headers(original_headers)
     rows: List[Dict[str, str]] = []
     for raw_row in data_rows:
         row: Dict[str, str] = {}
@@ -244,6 +258,24 @@ def read_csv(content: bytes) -> Tuple[List[str], List[Dict[str, str]]]:
         if any(value for value in row.values()):
             rows.append(row)
     return normalized_headers, rows
+
+
+def normalize_headers(headers: List[str]) -> List[str]:
+    normalized_headers: List[str] = []
+    last_named = ""
+    unnamed_count = 0
+    for header in headers:
+        normalized = normalize_header(header or "")
+        if normalized:
+            normalized_headers.append(normalized)
+            last_named = normalized
+            continue
+        if last_named in {"change", "balance"}:
+            normalized_headers.append(f"{last_named}_amount")
+        else:
+            unnamed_count += 1
+            normalized_headers.append(f"unnamed_{unnamed_count}")
+    return normalized_headers
 
 
 def preferred_delimiter(sample: str) -> str:
@@ -301,6 +333,18 @@ def parse_date(value: str) -> str:
     raise ParseError(f"Could not parse date: {value}")
 
 
+def parse_amex_date(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        raise ParseError("Missing transaction date")
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value[:10], fmt).date().isoformat()
+        except ValueError:
+            continue
+    raise ParseError(f"Could not parse Amex date: {value}")
+
+
 def parse_amount(value: str, debit_credit: str = "") -> float:
     raw = (value or "").strip()
     if not raw:
@@ -321,6 +365,30 @@ def parse_amount(value: str, debit_credit: str = "") -> float:
     return -abs(amount) if negative else abs(amount)
 
 
+def parse_number(value: str) -> float:
+    raw = (value or "").strip()
+    if not raw:
+        raise ParseError("Missing number")
+    negative = raw.startswith("-")
+    cleaned = raw.replace("EUR", "").replace("€", "").replace(" ", "").replace("+", "").replace("-", "")
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    try:
+        amount = float(cleaned)
+    except ValueError as exc:
+        raise ParseError(f"Could not parse number: {value}") from exc
+    return -amount if negative else amount
+
+
+def optional_number(value: str) -> Optional[float]:
+    return parse_number(value) if (value or "").strip() else None
+
+
 def detect_institution(filename: str, headers: List[str], requested: Optional[str] = None) -> str:
     if requested:
         return requested.lower()
@@ -334,6 +402,10 @@ def detect_institution(filename: str, headers: List[str], requested: Optional[st
         return "abn"
     if "clientaccountid" in header_set or "asset_category" in header_set or "ibkr" in name:
         return "ibkr"
+    if {"status", "direction", "created_on", "source_currency", "target_currency"} <= header_set:
+        return "wise"
+    if {"datum", "omschrijving", "kaartlid", "rekening", "bedrag"} <= header_set:
+        return "amex"
     if "degiro" in name or "waarde" in header_set and "isin" in header_set:
         return "degiro"
     if "ing" in name:
@@ -353,9 +425,15 @@ def parse_transactions(
 ) -> Tuple[str, List[ParsedTransaction]]:
     headers, rows = read_csv(content)
     detected = detect_institution(filename, headers, institution)
+    if detected == "ibkr" and headers[:4] == ["statement", "header", "field_name", "field_value"]:
+        return detected, parse_ibkr_activity_statement(filename, content, account_hint)
     parsed: List[ParsedTransaction] = []
     for index, row in enumerate(rows, start=2):
-        parsed.append(parse_row(detected, row, index, account_hint))
+        try:
+            parsed_row = parse_row(detected, row, index, account_hint)
+        except SkipRow:
+            continue
+        parsed.append(parsed_row)
     return detected, parsed
 
 
@@ -368,6 +446,10 @@ def parse_row(institution: str, row: Dict[str, str], row_number: int, account_hi
         return parse_ibkr(row, row_number, account_hint)
     if institution == "degiro":
         return parse_degiro(row, row_number, account_hint)
+    if institution == "wise":
+        return parse_wise(row, row_number, account_hint)
+    if institution == "amex":
+        return parse_amex(row, row_number, account_hint)
     return parse_generic(row, row_number, account_hint, institution)
 
 
@@ -408,6 +490,7 @@ def parse_ing(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
         counterparty_account=counterparty_account,
         description=description,
         reference=first_value(row, "code", "reference"),
+        resulting_balance=optional_number(first_value(row, "resulting_balance")),
     )
 
 
@@ -437,6 +520,8 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
     ) or extract_iban(description, exclude=(own_account,))
     currency = first_value(row, "valuta", "currency") or "EUR"
     booking_date = first_value(row, "booking_date", "boekdatum", "datum", "date", "transaction_date")
+    opening_balance = optional_number(first_value(row, "opening_balance"))
+    closing_balance = optional_number(first_value(row, "closing_balance"))
     return ParsedTransaction(
         row_number=row_number,
         raw=row,
@@ -451,6 +536,8 @@ def parse_abn(row: Dict[str, str], row_number: int, account_hint: str) -> Parsed
         counterparty_account=counterparty_account,
         description=description or counterparty,
         reference=first_value(row, "referentie", "reference"),
+        opening_balance=opening_balance,
+        closing_balance=closing_balance,
     )
 
 
@@ -484,9 +571,64 @@ def parse_ibkr(row: Dict[str, str], row_number: int, account_hint: str) -> Parse
     )
 
 
+def parse_ibkr_activity_statement(filename: str, content: bytes, account_hint: str) -> List[ParsedTransaction]:
+    text = decode_csv(content)
+    rows = list(csv.reader(io.StringIO(text)))
+    account = account_hint or "IBKR account"
+    parsed: List[ParsedTransaction] = []
+    for row in rows:
+        if len(row) >= 4 and row[0] == "Account Information" and row[1] == "Data" and row[2] == "Account":
+            account = row[3] or account
+            break
+    for row_number, row in enumerate(rows, start=1):
+        if len(row) < 6:
+            continue
+        if row[0] != "Deposits & Withdrawals" or row[1] != "Data":
+            continue
+        currency = (row[2] or "").strip().upper()
+        if not currency or currency.startswith("TOTAL"):
+            continue
+        settle_date = (row[3] or "").strip()
+        amount_text = (row[5] or "").strip()
+        if not settle_date or not amount_text:
+            continue
+        amount = parse_number(amount_text)
+        description = row[4] or "IBKR deposit/withdrawal"
+        parsed.append(
+            ParsedTransaction(
+                row_number=row_number,
+                raw={
+                    "section": row[0],
+                    "currency": currency,
+                    "settle_date": settle_date,
+                    "description": description,
+                    "amount": amount_text,
+                    "filename": filename,
+                },
+                institution="ibkr",
+                account_hint=account_hint or account,
+                account_identifier=account,
+                transaction_date=parse_date(settle_date),
+                booking_date=parse_date(settle_date),
+                amount=amount,
+                currency=currency,
+                counterparty_name="IBKR",
+                counterparty_account="",
+                description=description,
+                reference=f"{filename}:{row_number}",
+                native_amount=amount,
+                native_currency=currency,
+            )
+        )
+    return parsed
+
+
 def parse_degiro(row: Dict[str, str], row_number: int, account_hint: str) -> ParsedTransaction:
     date = parse_date(first_value(row, "datum", "date", "boekdatum"))
-    amount = parse_amount(first_value(row, "bedrag", "amount", "mutatie", "waarde"))
+    amount_value = first_value(row, "bedrag", "amount", "mutatie", "waarde", "change_amount")
+    if not amount_value:
+        raise SkipRow()
+    amount = parse_amount(amount_value)
     description = " ".join(
         part
         for part in [
@@ -506,11 +648,119 @@ def parse_degiro(row: Dict[str, str], row_number: int, account_hint: str) -> Par
         transaction_date=date,
         booking_date=date,
         amount=amount,
-        currency=first_value(row, "valuta", "currency") or "EUR",
+        currency=first_value(row, "valuta", "currency", "change") or "EUR",
         counterparty_name="DeGiro",
         counterparty_account="",
         description=description or "DeGiro transaction",
         reference=first_value(row, "id", "referentie", "reference"),
+        resulting_balance=optional_number(first_value(row, "balance_amount")),
+    )
+
+
+def parse_wise(row: Dict[str, str], row_number: int, account_hint: str) -> ParsedTransaction:
+    status = first_value(row, "status").upper()
+    if status not in {"COMPLETED"}:
+        raise SkipRow()
+    direction = first_value(row, "direction").upper()
+    if direction == "NEUTRAL":
+        raise SkipRow()
+    if direction not in {"IN", "OUT"}:
+        raise ParseError(f"Unsupported Wise direction: {direction}")
+    date = parse_date(first_value(row, "finished_on", "created_on"))
+    source_amount = optional_number(first_value(row, "source_amount_after_fees"))
+    target_amount = optional_number(first_value(row, "target_amount_after_fees"))
+    source_currency = first_value(row, "source_currency").upper()
+    target_currency = first_value(row, "target_currency").upper()
+    source_fee = optional_number(first_value(row, "source_fee_amount")) or 0.0
+    source_fee_currency = first_value(row, "source_fee_currency").upper()
+    exchange_rate = optional_number(first_value(row, "exchange_rate"))
+    if direction == "OUT":
+        native_amount = source_amount if source_amount is not None else target_amount
+        native_currency = source_currency or target_currency or "EUR"
+        if native_amount is None:
+            raise ParseError("Missing Wise source amount")
+        if source_fee_currency == native_currency:
+            native_amount += source_fee
+        amount = -abs(native_amount)
+        counterparty = first_value(row, "target_name") or first_value(row, "category") or "Wise transfer"
+    else:
+        native_amount = target_amount if target_amount is not None else source_amount
+        native_currency = target_currency or source_currency or "EUR"
+        if native_amount is None:
+            raise ParseError("Missing Wise target amount")
+        amount = abs(native_amount)
+        counterparty = first_value(row, "source_name") or first_value(row, "category") or "Wise transfer"
+    description = " ".join(
+        part
+        for part in [
+            first_value(row, "category"),
+            first_value(row, "reference"),
+            first_value(row, "note"),
+            first_value(row, "source_name"),
+            first_value(row, "target_name"),
+        ]
+        if part
+    )
+    account = account_hint or "Wise"
+    return ParsedTransaction(
+        row_number=row_number,
+        raw=row,
+        institution="wise",
+        account_hint=account,
+        account_identifier=account,
+        transaction_date=date,
+        booking_date=date,
+        amount=amount,
+        currency=native_currency or "EUR",
+        counterparty_name=counterparty,
+        counterparty_account="",
+        description=description or counterparty,
+        reference=first_value(row, "id", "reference"),
+        native_amount=amount,
+        native_currency=native_currency,
+        source_amount=source_amount,
+        source_currency=source_currency,
+        target_amount=target_amount,
+        target_currency=target_currency,
+        exchange_rate=exchange_rate,
+    )
+
+
+def parse_amex(row: Dict[str, str], row_number: int, account_hint: str) -> ParsedTransaction:
+    date_text = first_value(row, "datum", "date")
+    if not re.match(r"^\d{1,2}/\d{1,2}/\d{4}$|^\d{4}-\d{2}-\d{2}$", date_text or ""):
+        raise SkipRow()
+    date = parse_amex_date(date_text)
+    raw_amount = parse_amount(first_value(row, "bedrag", "amount"))
+    amount = -raw_amount
+    account = first_value(row, "rekening", "rekening_#", "account") or account_hint or "Amex card"
+    merchant = first_value(row, "omschrijving", "description")
+    statement_label = first_value(row, "vermeld_op_uw_rekeningoverzicht_als")
+    description = " ".join(
+        part
+        for part in [
+            merchant,
+            first_value(row, "aanvullende_informatie"),
+            statement_label,
+            first_value(row, "plaats"),
+            first_value(row, "land"),
+        ]
+        if part
+    )
+    return ParsedTransaction(
+        row_number=row_number,
+        raw=row,
+        institution="amex",
+        account_hint=account_hint or account,
+        account_identifier=account,
+        transaction_date=date,
+        booking_date=date,
+        amount=amount,
+        currency="EUR",
+        counterparty_name=merchant or statement_label,
+        counterparty_account="",
+        description=description or merchant,
+        reference=first_value(row, "referentie", "reference"),
     )
 
 
