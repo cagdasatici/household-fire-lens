@@ -399,6 +399,7 @@ async function loadReview() {
             <small>${escapeHtml(item.account_name || "Account")} · ${escapeHtml(item.account_role || "unknown")} · Current: ${escapeHtml(item.economic_class || "unknown")} / ${escapeHtml(item.category || "Uncategorized")}</small>
           </div>
           <div class="review-actions">
+            <button data-review-details="${item.id}">Details</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Groceries">Groceries</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Eating Out">Eating out</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="household_spend" data-category="Holiday">Holiday</button>
@@ -409,11 +410,73 @@ async function loadReview() {
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="wealth_allocation" data-category="Investments">Investment</button>
             <button data-review="${item.id}" data-transaction="${item.transaction_id}" data-class="reimbursement_pass_through" data-category="Reimbursements" data-subcategory="Company Expense">Reimb.</button>
           </div>
+          <div id="review-details-${item.id}" class="review-details" hidden></div>
         </article>
       `;
       },
     )
     .join("");
+}
+
+async function toggleReviewDetails(button) {
+  const panel = document.getElementById(`review-details-${button.dataset.reviewDetails}`);
+  if (!panel) return;
+  if (!panel.hidden) {
+    panel.hidden = true;
+    return;
+  }
+  if (panel.dataset.loaded === "true") {
+    panel.hidden = false;
+    return;
+  }
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Loading...";
+  try {
+    const data = await api(`/api/review-items/${button.dataset.reviewDetails}/transactions`);
+    panel.innerHTML = renderReviewDetails(data.transactions || []);
+    panel.dataset.loaded = "true";
+    panel.hidden = false;
+  } catch (error) {
+    panel.innerHTML = `<p class="inline-status">${escapeHtml(error.message)}</p>`;
+    panel.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+function renderReviewDetails(rows) {
+  if (!rows.length) return `<p class="empty">No grouped transactions found.</p>`;
+  const body = rows
+    .map(
+      (row) => `
+        <tr>
+          <td>${escapeHtml(row.transaction_date)}</td>
+          <td class="numeric">${fmtPrecise(row.amount)}</td>
+          <td>${escapeHtml(row.from_account || row.account_name || "")}</td>
+          <td>${escapeHtml(row.to_account || row.counterparty_name || "")}</td>
+          <td>${escapeHtml(row.description || row.normalized_merchant || "")}</td>
+          <td>${escapeHtml(`${row.economic_class || ""} / ${row.category || ""}${row.subcategory ? ` / ${row.subcategory}` : ""}`)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Amount</th>
+          <th>From</th>
+          <th>To</th>
+          <th>Description</th>
+          <th>Current</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
 }
 
 async function resolveReview(button) {
@@ -633,6 +696,10 @@ function bindImport() {
 }
 
 document.addEventListener("click", (event) => {
+  if (event.target.matches("[data-review-details]")) {
+    event.preventDefault();
+    toggleReviewDetails(event.target);
+  }
   if (event.target.matches("[data-review]")) {
     event.preventDefault();
     resolveReview(event.target);

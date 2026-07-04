@@ -394,6 +394,27 @@ th.number {
   font-size: 13px;
 }
 
+.review-details {
+  grid-column: 1 / -1;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.review-details table {
+  min-width: 980px;
+}
+
+.review-details td {
+  vertical-align: top;
+  white-space: normal;
+}
+
+.review-details td:nth-child(5) {
+  max-width: 420px;
+}
+
 .signal,
 .review-item,
 .rule-item,

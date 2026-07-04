@@ -23,7 +23,7 @@ from .aggregation import (
     recurring_merchants,
     spending_breakdown,
 )
-from .classifier import classify_all, create_rule_from_review
+from .classifier import classify_all, create_rule_from_review, review_group_key
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
 from .entity_resolver import enrich_candidate_merchants, store_user_entity_mapping
 from .importer import import_csv
@@ -144,6 +144,9 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json({"transactions": self.list_transactions(query)})
         elif path == "/api/review-items":
             self.send_json({"review_items": self.list_review_items()})
+        elif path.startswith("/api/review-items/") and path.endswith("/transactions"):
+            review_id = int(path.split("/")[3])
+            self.send_json({"transactions": self.list_review_group_transactions(review_id)})
         elif path == "/api/dashboard/fire":
             fire_multiple = float((query.get("multiple") or ["25"])[0])
             self.send_json(fire_snapshot(self.conn, fire_multiple))
@@ -460,6 +463,59 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         for row in rows:
             row["suggested_action"] = json_loads(row.pop("suggested_action_json"), {})
         return rows
+
+    def list_review_group_transactions(self, review_id: int) -> Any:
+        review = self.conn.execute(
+            """
+            SELECT
+                ri.transaction_id,
+                nt.id, nt.amount, nt.direction, nt.normalized_merchant,
+                nt.counterparty_account_hash, nt.description, nt.counterparty_name
+            FROM review_items ri
+            JOIN normalized_transactions nt ON nt.id = ri.transaction_id
+            WHERE ri.id = ?
+              AND ri.status = 'open'
+            """,
+            (review_id,),
+        ).fetchone()
+        if not review:
+            return []
+        target_key = review_group_key(review)
+        rows = self.conn.execute(
+            """
+            SELECT
+                nt.id, nt.transaction_date, nt.booking_date, nt.amount, nt.currency,
+                nt.direction, nt.counterparty_name, nt.counterparty_account_hash,
+                nt.description, nt.normalized_merchant, nt.reference,
+                a.display_name AS account_name, a.institution, a.role AS account_role,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence,
+                ta.digest_tier, ta.explanation
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND (
+                ta.economic_class = 'needs_review'
+                OR ta.digest_tier = 'review'
+                OR ta.confidence < 0.55
+                OR (ta.category = 'Uncategorized' AND ABS(nt.amount) >= 100)
+              )
+            ORDER BY nt.transaction_date, nt.id
+            """
+        ).fetchall()
+        grouped = []
+        for row in rows:
+            if review_group_key(row) != target_key:
+                continue
+            item = dict(row)
+            if float(item["amount"]) < 0:
+                item["from_account"] = item["account_name"]
+                item["to_account"] = item["counterparty_name"] or item["normalized_merchant"] or "Counterparty"
+            else:
+                item["from_account"] = item["counterparty_name"] or item["normalized_merchant"] or "Counterparty"
+                item["to_account"] = item["account_name"]
+            grouped.append(item)
+        return grouped
 
     def rule_audit(self) -> Any:
         rows = fetch_all(

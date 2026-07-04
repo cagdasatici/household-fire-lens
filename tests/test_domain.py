@@ -14,6 +14,7 @@ from household_fire_lens.parsers import (
     parse_ing_credit_card_pdf_text,
     parse_transactions,
 )
+from household_fire_lens.server import HouseholdFireLensHandler
 
 
 ING_CSV = """Datum;Naam / Omschrijving;Rekening;Tegenrekening;Code;Af Bij;Bedrag (EUR);MutatieSoort;Mededelingen
@@ -769,6 +770,32 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(review_count_after, 0)
         self.assertEqual({row["category"] for row in rows}, {"Shopping"})
         self.assertEqual({row["rule_id"] for row in rows}, {rule_id})
+
+    def test_review_group_details_return_all_grouped_transactions(self):
+        csv_text = """Date,Account,Description,Counterparty,Counter Account,Amount,Currency
+2026-04-01,Main,Family transfer one,C. Atici,shared-counterparty,-500.00,EUR
+2026-04-02,Main,Family transfer two,C. Atici,shared-counterparty,-340.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-group-details.csv",
+            csv_text.encode("utf-8"),
+            institution="ing",
+            account_role="checking",
+            account_hint="ING Main",
+        )
+        classify_all(self.conn)
+        review = self.conn.execute(
+            "SELECT id, materiality FROM review_items WHERE status = 'open'"
+        ).fetchone()
+        handler = type("Handler", (), {"conn": self.conn})()
+        rows = HouseholdFireLensHandler.list_review_group_transactions(handler, review["id"])
+        self.assertEqual(review["materiality"], 840.0)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["transaction_date"] for row in rows], ["2026-04-01", "2026-04-02"])
+        self.assertEqual([row["amount"] for row in rows], [-500.0, -340.0])
+        self.assertEqual({row["from_account"] for row in rows}, {"ING Main"})
+        self.assertEqual({row["to_account"] for row in rows}, {"C. Atici"})
 
     def test_bank_transfer_review_rule_scopes_to_counterparty_group(self):
         csv_text = """Date,Account,Description,Counterparty,Counterparty account,Amount,Currency
