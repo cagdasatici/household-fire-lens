@@ -648,6 +648,79 @@ def category_trends(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return alerts
 
 
+def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Year-over-year spending analysis with key takeaways."""
+    rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 4) AS year,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            SUM(CASE WHEN nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS outflow
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+        GROUP BY year, category
+        ORDER BY year, category
+        """
+    ).fetchall()
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    current_year = today.strftime("%Y")
+    current_month = today.strftime("%m")
+
+    by_year_category: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for row in rows:
+        by_year_category[row["year"]][row["category"]] = float(row["outflow"])
+
+    all_categories = set()
+    for year_data in by_year_category.values():
+        all_categories.update(year_data.keys())
+
+    comparison = {
+        "categories": [],
+        "yearly_totals": {},
+        "key_takeaways": [],
+    }
+
+    for year in sorted(by_year_category.keys()):
+        yearly_total = sum(by_year_category[year].values())
+        comparison["yearly_totals"][year] = {"total": money(yearly_total), "months": int(year) == int(current_year) and int(current_month) or 12}
+
+    for category in sorted(all_categories):
+        cat_data = {
+            "category": category,
+            "years": {},
+        }
+        for year in sorted(by_year_category.keys()):
+            amount = by_year_category[year].get(category, 0.0)
+            cat_data["years"][year] = money(amount)
+        comparison["categories"].append(cat_data)
+
+    if "2024" in by_year_category and "2023" in by_year_category:
+        changes = []
+        for category in all_categories:
+            amount_2023 = by_year_category["2023"].get(category, 0.0)
+            amount_2024 = by_year_category["2024"].get(category, 0.0)
+            if amount_2023 > 100:
+                change_pct = ((amount_2024 - amount_2023) / amount_2023) * 100 if amount_2023 else 0
+                if abs(change_pct) > 15:
+                    changes.append({
+                        "category": category,
+                        "amount_2023": money(amount_2023),
+                        "amount_2024": money(amount_2024),
+                        "change": f"{change_pct:+.1f}%",
+                        "delta": money(amount_2024 - amount_2023),
+                    })
+        changes.sort(key=lambda x: abs(float(x["delta"].replace("€", "").replace(",", "."))), reverse=True)
+        comparison["key_takeaways"].append({
+            "title": "Year-over-year category shifts (2023 → 2024)",
+            "items": changes[:5],
+        })
+
+    return comparison
+
+
 def list_amortization_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     rows = conn.execute(
         """

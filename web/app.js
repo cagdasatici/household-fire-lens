@@ -7,6 +7,7 @@ const titles = {
   flow: ["Monthly Flow", "Month-by-month household economics."],
   spending: ["Spending", "Category, merchant, and transaction drilldown."],
   buckets: ["Buckets", "Every spending bucket summed by month and year."],
+  insights: ["Insights", "Year-over-year spending analysis and key takeaways."],
   review: ["Review", "Material uncertainty that needs a decision."],
   health: ["Data Health", "Trust indicators for imported and classified data."],
   imports: ["Imports", "Upload files, set account roles, and inspect rules."],
@@ -742,6 +743,78 @@ async function loadBuckets() {
   renderBucketMonthTotals(data.months || []);
 }
 
+async function loadInsights() {
+  const data = await api("/api/dashboard/insights");
+  renderInsights(data);
+}
+
+function renderInsights(data) {
+  const target = document.getElementById("insights-content");
+  if (!data.categories || data.categories.length === 0) {
+    target.innerHTML = `<p class="empty">No spending data yet.</p>`;
+    return;
+  }
+
+  let html = `
+    <div class="insights-panel">
+      <h4>Yearly Totals</h4>
+      <div class="insights-totals">
+  `;
+
+  for (const [year, yearData] of Object.entries(data.yearly_totals || {})) {
+    html += `<div class="insight-metric"><span>${year}</span><strong>${yearData.total}</strong></div>`;
+  }
+
+  html += `</div></div>`;
+
+  html += `
+    <div class="insights-panel">
+      <h4>Spending by Category</h4>
+      <div class="table-wrap">
+        <table class="insights-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+  `;
+
+  const years = Object.keys(data.yearly_totals || {}).sort();
+  for (const year of years) {
+    html += `<th>${year}</th>`;
+  }
+  html += `</tr></thead><tbody>`;
+
+  for (const cat of data.categories) {
+    html += `<tr><td>${escapeHtml(cat.category)}</td>`;
+    for (const year of years) {
+      const amount = cat.years[year] || "€0.00";
+      html += `<td>${amount}</td>`;
+    }
+    html += `</tr>`;
+  }
+
+  html += `</tbody></table></div></div>`;
+
+  if (data.key_takeaways && data.key_takeaways.length > 0) {
+    html += `<div class="insights-panel"><h4>Key Takeaways</h4>`;
+    for (const takeaway of data.key_takeaways) {
+      html += `<div class="insight-takeaway"><strong>${escapeHtml(takeaway.title)}</strong>`;
+      if (takeaway.items && takeaway.items.length > 0) {
+        html += `<ul>`;
+        for (const item of takeaway.items) {
+          if (item.category) {
+            html += `<li><strong>${escapeHtml(item.category)}</strong>: ${item.amount_2023 || "€0"} → ${item.amount_2024 || "€0"} <span class="change">${item.change}</span> (${item.delta})</li>`;
+          }
+        }
+        html += `</ul>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+
+  target.innerHTML = html;
+}
+
 function populateCategoryFilter(rows) {
   const select = document.getElementById("transaction-category");
   const current = select.value;
@@ -1140,7 +1213,7 @@ async function refreshAll() {
   setText("side-db-status", "refreshing");
   await loadMetadata();
   await loadFire();
-  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadBuckets(), loadReview(), loadImports()]);
+  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadBuckets(), loadInsights(), loadReview(), loadImports()]);
   setText("side-db-status", "ready");
 }
 

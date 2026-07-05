@@ -21,6 +21,7 @@
         <button class="nav-item" data-view="flow">Monthly Flow</button>
         <button class="nav-item" data-view="spending">Spending</button>
         <button class="nav-item" data-view="buckets">Buckets</button>
+        <button class="nav-item" data-view="insights">Insights</button>
         <button class="nav-item" data-view="review">Review</button>
         <button class="nav-item" data-view="health">Data Health</button>
         <button class="nav-item" data-view="imports">Imports</button>
@@ -279,6 +280,16 @@
             <span>Every bucket across the selected period</span>
           </div>
           <div id="bucket-months" class="matrix wide-matrix"></div>
+        </div>
+      </section>
+
+      <section id="insights" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Spending Analysis</h3>
+            <span>Year-over-year breakdown and key takeaways</span>
+          </div>
+          <div id="insights-content" class="insights-grid"></div>
         </div>
       </section>
 
