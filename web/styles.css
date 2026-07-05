@@ -125,6 +125,27 @@ button:hover {
   color: white;
 }
 
+.sort-button {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 6px 12px;
+  font-size: 0.9em;
+  min-height: auto;
+}
+
+.sort-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sort-button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a2530;
+  font-weight: 600;
+}
+
 .nav-item {
   width: 100%;
   text-align: left;

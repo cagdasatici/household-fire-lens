@@ -23,7 +23,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditBusy: false };
+const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditBusy: false };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -255,9 +255,10 @@ async function renderMonthAudit(month) {
   panel.classList.remove("hidden");
   setAuditStatus("Loading OUT transactions...");
   list.innerHTML = `<p class="empty">Loading month audit...</p>`;
+  updateSortButtonStates();
   let data;
   try {
-    data = await api(`/api/month-audit?month=${encodeURIComponent(month)}`);
+    data = await api(`/api/month-audit?month=${encodeURIComponent(month)}&sort=${encodeURIComponent(state.auditSort)}`);
   } catch (error) {
     setAuditStatus(error.message, "error");
     list.innerHTML = `<p class="empty">Could not load this month.</p>`;
@@ -334,6 +335,22 @@ function setAuditStatus(message, tone = "info") {
   if (!status) return;
   status.textContent = message;
   status.dataset.tone = tone;
+}
+
+function updateSortButtonStates() {
+  document.querySelectorAll(".sort-button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.sort === state.auditSort);
+  });
+}
+
+async function handleSortClick(event) {
+  const button = event.target;
+  if (!button.classList.contains("sort-button")) return;
+  state.auditSort = button.dataset.sort;
+  updateSortButtonStates();
+  if (state.auditMonth) {
+    await renderMonthAudit(state.auditMonth);
+  }
 }
 
 async function handleAuditAction(button) {
@@ -1005,6 +1022,7 @@ document.addEventListener("click", (event) => {
   const reviewButton = target.closest("[data-review]");
   const amortizationButton = target.closest("[data-amortization]");
   const monthButton = target.closest("[data-month]");
+  const sortButton = target.closest(".sort-button");
   const auditActionButton = target.closest("[data-audit-action]");
   if (reviewDetailsButton) {
     event.preventDefault();
@@ -1021,6 +1039,10 @@ document.addEventListener("click", (event) => {
   if (monthButton) {
     event.preventDefault();
     renderMonthAudit(monthButton.dataset.month);
+  }
+  if (sortButton) {
+    event.preventDefault();
+    handleSortClick(event);
   }
   if (auditActionButton) {
     event.preventDefault();

@@ -173,7 +173,8 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json(self.bucket_totals(period))
         elif path == "/api/month-audit":
             month = (query.get("month") or [""])[0]
-            self.send_json({"month": month, "rows": self.month_audit(month)})
+            sort = (query.get("sort") or ["confidence"])[0]
+            self.send_json({"month": month, "rows": self.month_audit(month, sort)})
         elif path == "/api/dashboard/optimization":
             recompute_monthly_snapshots(self.conn)
             self.send_json(optimization_insights(self.conn))
@@ -459,12 +460,17 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             tuple(params),
         )
 
-    def month_audit(self, month: str) -> Any:
+    def month_audit(self, month: str, sort: str = "confidence") -> Any:
         if not month or len(month) != 7:
             return []
+        order_by = {
+            "confidence": "ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date, nt.id",
+            "amount": "ABS(nt.amount) DESC, ta.confidence ASC, nt.transaction_date, nt.id",
+            "date": "nt.transaction_date DESC, ABS(nt.amount) DESC, ta.confidence ASC, nt.id",
+        }.get(sort, "ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date, nt.id")
         rows = fetch_all(
             self.conn,
-            """
+            f"""
             SELECT
                 nt.id, nt.transaction_date, nt.amount, nt.currency, nt.normalized_merchant,
                 nt.counterparty_name, nt.description,
@@ -481,7 +487,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
               AND nt.amount < 0
               AND ta.economic_class IN ('household_spend', 'debt_service')
             GROUP BY nt.id
-            ORDER BY ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date, nt.id
+            ORDER BY {order_by}
             """,
             (month,),
         )
