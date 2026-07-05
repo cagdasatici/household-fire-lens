@@ -715,6 +715,8 @@ def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
                         "_delta_numeric": delta,
                     })
         changes.sort(key=lambda x: abs(x["_delta_numeric"]), reverse=True)
+        for change in changes:
+            del change["_delta_numeric"]
         comparison["key_takeaways"].append({
             "title": "Year-over-year category shifts (2023 → 2024)",
             "items": changes[:5],
