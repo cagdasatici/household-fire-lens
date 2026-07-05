@@ -129,6 +129,21 @@
           <p id="month-audit-status" class="inline-status" data-tone="info"></p>
           <div id="month-audit-list" class="audit-list"></div>
         </div>
+
+        <div id="month-income-panel" class="panel hidden">
+          <div class="panel-heading">
+            <h3 id="month-income-title">Month Income</h3>
+            <span>Income sources and composition</span>
+          </div>
+          <div class="toolbar compact-toolbar" style="margin: 12px 0;">
+            <span style="font-size: 0.85em; color: var(--text-secondary);">Sort by:</span>
+            <button class="sort-income-button active" data-sort="amount">Amount</button>
+            <button class="sort-income-button" data-sort="confidence">Confidence</button>
+            <button class="sort-income-button" data-sort="date">Date</button>
+          </div>
+          <p id="month-income-status" class="inline-status" data-tone="info"></p>
+          <div id="month-income-list" class="income-list"></div>
+        </div>
       </section>
 
       <section id="optimization" class="view">

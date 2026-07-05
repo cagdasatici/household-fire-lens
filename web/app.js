@@ -23,7 +23,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditCategoryFilter: null, auditBusy: false, auditRows: null };
+const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditCategoryFilter: null, auditBusy: false, auditRows: null, incomeMonth: null, incomeSort: "amount", incomeCategoryFilter: null, incomeRows: null };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -179,7 +179,7 @@ function renderBurnChart(months) {
         <div class="bar-row monthly-flow-row" title="${escapeHtml(monthTooltip(row))}">
           <button class="month-link" data-month="${escapeHtml(row.month)}">${escapeHtml(row.month)}</button>
           <div class="bar-stack">
-            <div class="flow-bar-line">
+            <button class="flow-bar-line drilldown-line" data-month-income="${escapeHtml(row.month)}" aria-label="Drill into ${escapeHtml(row.month)} in transactions">
               <small>In</small>
               <div class="bar-track segmented">
                 <div class="bar-fill income regular" style="width: ${regularWidth}%"></div>
@@ -187,7 +187,7 @@ function renderBurnChart(months) {
                 ${incomeOverflow ? `<span class="overflow-marker">›</span>` : ""}
               </div>
               <strong>${fmtMoney(income)}</strong>
-            </div>
+            </button>
             <button class="flow-bar-line drilldown-line" data-month="${escapeHtml(row.month)}" aria-label="Drill into ${escapeHtml(row.month)} out transactions">
               <small>Out</small>
               <div class="bar-track"><div class="bar-fill outflow" style="width: ${outflowWidth}%"></div>${outflowOverflow ? `<span class="overflow-marker">›</span>` : ""}</div>
@@ -356,6 +356,93 @@ function renderAuditTransactions(rows) {
   setAuditStatus(`${filteredRows.length} of ${rows.length} OUT transactions${state.auditCategoryFilter ? ` (${state.auditCategoryFilter})` : ""}. Click a row action to correct and recalculate.`);
 }
 
+async function renderMonthIncome(month) {
+  const panel = document.getElementById("month-income-panel");
+  const list = document.getElementById("month-income-list");
+  if (state.auditBusy) {
+    setIncomeStatus("Still saving the last change. One moment...", "info");
+    return;
+  }
+  state.incomeMonth = month;
+  state.incomeCategoryFilter = null;
+  state.incomeRows = null;
+  document.getElementById("month-income-title").textContent = `${month} IN Drilldown`;
+  panel.classList.remove("hidden");
+  setIncomeStatus("Loading IN transactions...");
+  list.innerHTML = `<p class="empty">Loading month income...</p>`;
+  updateIncomeSortButtonStates();
+  let data;
+  try {
+    data = await api(`/api/month-income?month=${encodeURIComponent(month)}&sort=${encodeURIComponent(state.incomeSort)}`);
+  } catch (error) {
+    setIncomeStatus(error.message, "error");
+    list.innerHTML = `<p class="empty">Could not load this month.</p>`;
+    return;
+  }
+  if (!data.rows.length) {
+    setIncomeStatus("No income transactions in this month.");
+    list.innerHTML = `<p class="empty">No income rows for this month.</p>`;
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const rows = data.rows || [];
+  state.incomeRows = rows;
+  const totalIncome = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const categoryTotals = rows.reduce((totals, row) => {
+    const key = row.category || "Uncategorized";
+    totals.set(key, (totals.get(key) || 0) + Number(row.amount || 0));
+    return totals;
+  }, new Map());
+  list.innerHTML = rows.length
+    ? `
+      <div class="audit-summary">
+        ${signal("Total IN", fmtPrecise(totalIncome), "Gross income")}
+      </div>
+      <div class="audit-category-strip">
+        ${[...categoryTotals.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([category, value]) => `<button class="category-filter-btn" data-category="${escapeHtml(category)}"><strong>${escapeHtml(category)}</strong>${fmtPrecise(value)}</button>`)
+          .join("")}
+      </div>
+    `
+    : "";
+  renderIncomeTransactions(rows);
+  setIncomeStatus(`${rows.length} IN transactions loaded.`);
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderIncomeTransactions(rows) {
+  const list = document.getElementById("month-income-list");
+  const filteredRows = state.incomeCategoryFilter
+    ? rows.filter((row) => row.category === state.incomeCategoryFilter)
+    : rows;
+  const strip = list.querySelector(".audit-category-strip");
+  if (strip) {
+    strip.querySelectorAll(".category-filter-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.category === state.incomeCategoryFilter);
+    });
+  }
+  const container = document.createElement("div");
+  container.innerHTML = filteredRows
+    .map((row) => `
+      <article class="audit-row">
+        <div>
+          <strong>${escapeHtml(row.normalized_merchant || row.counterparty_name || "Unknown")}</strong>
+          <span>${escapeHtml(row.transaction_date)} · ${fmtPrecise(row.amount)}</span>
+          <small>${escapeHtml(row.account_name || "Account")} · ${escapeHtml(row.category || "Uncategorized")} · ${escapeHtml(row.subcategory || "")} · confidence ${fmtPercent(row.confidence)}</small>
+          <p>${escapeHtml(row.description || "")}</p>
+          <p class="audit-why">${escapeHtml(row.explanation || "")}</p>
+        </div>
+      </article>
+    `)
+    .join("");
+  while (list.lastChild && list.lastChild !== strip) {
+    list.removeChild(list.lastChild);
+  }
+  list.appendChild(container);
+  setIncomeStatus(`${filteredRows.length} of ${rows.length} IN transactions${state.incomeCategoryFilter ? ` (${state.incomeCategoryFilter})` : ""}.`);
+}
+
 function setAuditStatus(message, tone = "info") {
   const status = document.getElementById("month-audit-status");
   if (!status) return;
@@ -388,6 +475,41 @@ function handleCategoryFilterClick(button) {
   }
   if (state.auditRows) {
     renderAuditTransactions(state.auditRows);
+  }
+}
+
+function setIncomeStatus(message, tone = "info") {
+  const status = document.getElementById("month-income-status");
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
+function updateIncomeSortButtonStates() {
+  document.querySelectorAll(".sort-income-button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.sort === state.incomeSort);
+  });
+}
+
+async function handleIncomeSortClick(event) {
+  const button = event.target;
+  if (!button.classList.contains("sort-income-button")) return;
+  state.incomeSort = button.dataset.sort;
+  updateIncomeSortButtonStates();
+  if (state.incomeMonth) {
+    await renderMonthIncome(state.incomeMonth);
+  }
+}
+
+function handleIncomeCategoryFilterClick(button) {
+  const category = button.dataset.category;
+  if (state.incomeCategoryFilter === category) {
+    state.incomeCategoryFilter = null;
+  } else {
+    state.incomeCategoryFilter = category;
+  }
+  if (state.incomeRows) {
+    renderIncomeTransactions(state.incomeRows);
   }
 }
 
@@ -1060,7 +1182,9 @@ document.addEventListener("click", (event) => {
   const reviewButton = target.closest("[data-review]");
   const amortizationButton = target.closest("[data-amortization]");
   const monthButton = target.closest("[data-month]");
+  const monthIncomeButton = target.closest("[data-month-income]");
   const sortButton = target.closest(".sort-button");
+  const incomeSortButton = target.closest(".sort-income-button");
   const categoryFilterButton = target.closest(".category-filter-btn");
   const auditActionButton = target.closest("[data-audit-action]");
   if (reviewDetailsButton) {
@@ -1079,13 +1203,25 @@ document.addEventListener("click", (event) => {
     event.preventDefault();
     renderMonthAudit(monthButton.dataset.month);
   }
+  if (monthIncomeButton) {
+    event.preventDefault();
+    renderMonthIncome(monthIncomeButton.dataset.monthIncome);
+  }
   if (sortButton) {
     event.preventDefault();
     handleSortClick(event);
   }
-  if (categoryFilterButton) {
+  if (incomeSortButton) {
+    event.preventDefault();
+    handleIncomeSortClick(event);
+  }
+  if (categoryFilterButton && !target.closest("#month-income-panel")) {
     event.preventDefault();
     handleCategoryFilterClick(categoryFilterButton);
+  }
+  if (categoryFilterButton && target.closest("#month-income-panel")) {
+    event.preventDefault();
+    handleIncomeCategoryFilterClick(categoryFilterButton);
   }
   if (auditActionButton) {
     event.preventDefault();

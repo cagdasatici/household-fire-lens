@@ -175,6 +175,10 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             month = (query.get("month") or [""])[0]
             sort = (query.get("sort") or ["confidence"])[0]
             self.send_json({"month": month, "rows": self.month_audit(month, sort)})
+        elif path == "/api/month-income":
+            month = (query.get("month") or [""])[0]
+            sort = (query.get("sort") or ["amount"])[0]
+            self.send_json({"month": month, "rows": self.month_income(month, sort)})
         elif path == "/api/dashboard/optimization":
             recompute_monthly_snapshots(self.conn)
             self.send_json(optimization_insights(self.conn))
@@ -499,6 +503,35 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 row["link_state"] = "done"
             else:
                 row["link_state"] = "linked" if linked else "open"
+        return rows
+
+    def month_income(self, month: str, sort: str = "amount") -> Any:
+        if not month or len(month) != 7:
+            return []
+        order_by = {
+            "confidence": "ta.confidence ASC, nt.amount DESC, nt.transaction_date, nt.id",
+            "amount": "nt.amount DESC, ta.confidence ASC, nt.transaction_date, nt.id",
+            "date": "nt.transaction_date DESC, nt.amount DESC, ta.confidence ASC, nt.id",
+        }.get(sort, "nt.amount DESC, ta.confidence ASC, nt.transaction_date, nt.id")
+        rows = fetch_all(
+            self.conn,
+            f"""
+            SELECT
+                nt.id, nt.transaction_date, nt.amount, nt.currency, nt.normalized_merchant,
+                nt.counterparty_name, nt.description,
+                a.display_name AS account_name,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.review_status, ta.explanation
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND substr(nt.transaction_date, 1, 7) = ?
+              AND nt.amount > 0
+              AND ta.economic_class = 'income'
+            ORDER BY {order_by}
+            """,
+            (month,),
+        )
         return rows
 
     def handle_transaction_action(self, tx_id: int, action: str) -> None:
