@@ -23,7 +23,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditBusy: false };
+const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditCategoryFilter: null, auditBusy: false, auditRows: null };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -251,6 +251,8 @@ async function renderMonthAudit(month) {
     return;
   }
   state.auditMonth = month;
+  state.auditCategoryFilter = null;
+  state.auditRows = null;
   document.getElementById("month-audit-title").textContent = `${month} OUT Drilldown`;
   panel.classList.remove("hidden");
   setAuditStatus("Loading OUT transactions...");
@@ -271,6 +273,7 @@ async function renderMonthAudit(month) {
     return;
   }
   const rows = data.rows || [];
+  state.auditRows = rows;
   const grossTotal = rows.reduce((sum, row) => sum + Math.abs(Number(row.amount || 0)), 0);
   const linkedTotal = rows.reduce((sum, row) => sum + Number(row.linked_reimbursement || 0), 0);
   const netTotal = rows.reduce((sum, row) => sum + Number(row.net_outflow || 0), 0);
@@ -289,12 +292,29 @@ async function renderMonthAudit(month) {
       <div class="audit-category-strip">
         ${[...categoryTotals.entries()]
           .sort((a, b) => b[1] - a[1])
-          .map(([category, value]) => `<span><strong>${escapeHtml(category)}</strong>${fmtPrecise(value)}</span>`)
+          .map(([category, value]) => `<button class="category-filter-btn" data-category="${escapeHtml(category)}"><strong>${escapeHtml(category)}</strong>${fmtPrecise(value)}</button>`)
           .join("")}
       </div>
     `
     : "";
-  list.innerHTML += rows
+  renderAuditTransactions(rows);
+  setAuditStatus(`${rows.length} OUT transactions loaded. Click a row action to correct and recalculate.`);
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderAuditTransactions(rows) {
+  const list = document.getElementById("month-audit-list");
+  const filteredRows = state.auditCategoryFilter
+    ? rows.filter((row) => row.category === state.auditCategoryFilter)
+    : rows;
+  const strip = list.querySelector(".audit-category-strip");
+  if (strip) {
+    strip.querySelectorAll(".category-filter-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.category === state.auditCategoryFilter);
+    });
+  }
+  const container = document.createElement("div");
+  container.innerHTML = filteredRows
     .map((row) => `
       <article class="audit-row ${row.link_state}">
         <div>
@@ -329,8 +349,11 @@ async function renderMonthAudit(month) {
       </article>
     `)
     .join("");
-  setAuditStatus(`${rows.length} OUT transactions loaded. Click a row action to correct and recalculate.`);
-  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  while (list.lastChild && list.lastChild !== strip) {
+    list.removeChild(list.lastChild);
+  }
+  list.appendChild(container);
+  setAuditStatus(`${filteredRows.length} of ${rows.length} OUT transactions${state.auditCategoryFilter ? ` (${state.auditCategoryFilter})` : ""}. Click a row action to correct and recalculate.`);
 }
 
 function setAuditStatus(message, tone = "info") {
@@ -353,6 +376,18 @@ async function handleSortClick(event) {
   updateSortButtonStates();
   if (state.auditMonth) {
     await renderMonthAudit(state.auditMonth);
+  }
+}
+
+function handleCategoryFilterClick(button) {
+  const category = button.dataset.category;
+  if (state.auditCategoryFilter === category) {
+    state.auditCategoryFilter = null;
+  } else {
+    state.auditCategoryFilter = category;
+  }
+  if (state.auditRows) {
+    renderAuditTransactions(state.auditRows);
   }
 }
 
@@ -1026,6 +1061,7 @@ document.addEventListener("click", (event) => {
   const amortizationButton = target.closest("[data-amortization]");
   const monthButton = target.closest("[data-month]");
   const sortButton = target.closest(".sort-button");
+  const categoryFilterButton = target.closest(".category-filter-btn");
   const auditActionButton = target.closest("[data-audit-action]");
   if (reviewDetailsButton) {
     event.preventDefault();
@@ -1046,6 +1082,10 @@ document.addEventListener("click", (event) => {
   if (sortButton) {
     event.preventDefault();
     handleSortClick(event);
+  }
+  if (categoryFilterButton) {
+    event.preventDefault();
+    handleCategoryFilterClick(categoryFilterButton);
   }
   if (auditActionButton) {
     event.preventDefault();

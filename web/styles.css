@@ -816,7 +816,7 @@ pre {
   flex-wrap: wrap;
 }
 
-.audit-category-strip span {
+.category-filter-btn {
   display: inline-flex;
   gap: 8px;
   align-items: center;
@@ -827,10 +827,28 @@ pre {
   background: #101820;
   color: var(--muted);
   font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
-.audit-category-strip strong {
+.category-filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.category-filter-btn strong {
   color: var(--text);
+}
+
+.category-filter-btn.active,
+.category-filter-btn:active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a2530;
+}
+
+.category-filter-btn.active strong {
+  color: #1a2530;
 }
 
 .audit-row {
