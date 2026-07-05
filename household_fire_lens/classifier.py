@@ -5,7 +5,7 @@ import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .database import json_dumps, json_loads
@@ -84,6 +84,54 @@ GENERIC_MERCHANT_SCOPES = {"", "SEPA", "SEPA OVERBOEKING", "TRANSACTION", "TRANS
 MAX_OPEN_REVIEW_GROUPS = 150
 UNKNOWN_OUTFLOW_REVIEW_THRESHOLD = 250.0
 ONE_OFF_INFLOW_REVIEW_THRESHOLD = 500.0
+
+# Summer-holiday trip detection. The debit "Payment terminal" export format always
+# carries a 3-letter country code (NLD domestic vs foreign); we seed trips from
+# foreign-coded terminal payments in the holiday months, cluster them by country and
+# date, then absorb nearby physical foreign card spend into one labeled trip so the
+# whole holiday collapses into a single "Holiday / <Country> <Year>" bucket.
+HOLIDAY_COUNTRY_CODES = {
+    "ESP": "Spain", "ITA": "Italy", "FRA": "France", "GRC": "Greece", "PRT": "Portugal",
+    "HRV": "Croatia", "TUR": "Turkey", "GBR": "United Kingdom", "AUT": "Austria",
+    "CHE": "Switzerland", "USA": "United States", "MAR": "Morocco", "MEX": "Mexico",
+    "THA": "Thailand", "IDN": "Indonesia", "EGY": "Egypt", "CYP": "Cyprus", "MLT": "Malta",
+}
+HOLIDAY_COUNTRY_NAMES = {
+    "SPAIN": "Spain", "ITALY": "Italy", "FRANCE": "France", "GREECE": "Greece",
+    "PORTUGAL": "Portugal", "CROATIA": "Croatia", "TURKEY": "Turkey", "AUSTRIA": "Austria",
+    "SWITZERLAND": "Switzerland", "MOROCCO": "Morocco", "CYPRUS": "Cyprus", "MALTA": "Malta",
+    "EGYPT": "Egypt", "THAILAND": "Thailand", "INDONESIA": "Indonesia",
+}
+HOLIDAY_DOMESTIC_MARKERS = ("NLD", "NEDERLAND")
+# Dutch cities/towns whose presence marks a transaction as domestic even when the
+# export omits the "NLD" country tag (common on ABN/ING terminal rows).
+HOLIDAY_DOMESTIC_CITIES = (
+    "AMSTERDAM", "AMSTELVEEN", "UITHOORN", "AALSMEER", "ZAANDAM", "HAARLEM", "HOOFDDORP",
+    "SCHIPHOL", "DIEMEN", "DUIVENDRECHT", "BADHOEVEDORP", "OUDERKERK", "ABCOUDE",
+    "MIJDRECHT", "UTRECHT", "ROTTERDAM", "DEN HAAG", "EINDHOVEN", "GRONINGEN", "ARNHEM",
+    "NIJMEGEN", "TILBURG", "BREDA", "ALMERE", "ZWOLLE", "LEIDEN", "DELFT", "PURMEREND",
+    "HILVERSUM", "ALKMAAR", "ZEIST", "AMERSFOORT", "APELDOORN", "ENSCHEDE", "MAASTRICHT",
+    "LELYSTAD", "HAARLEMMERMEER", "VOLENDAM", "LISSE", "HEEMSTEDE", "BUSSUM", "WEESP",
+)
+HOLIDAY_ONLINE_MARKERS = (
+    "AMAZON", "AMZN", "PAYPAL", "BOL.COM", "IDEAL", "UBER", "NETFLIX", "SPOTIFY",
+    "HELP.", "AMAZON.NL", "AMAZON.DE", "MARKTPLAATS", "COOLBLUE", "ZALANDO",
+)
+HOLIDAY_TERMINAL_MARKERS = ("PAYMENT TERMINAL", "KAARTNUMMER", "CARD SEQUENCE", "TRANSACTIEDATUM")
+HOLIDAY_TRIP_MONTHS = {6, 7, 8, 9}
+HOLIDAY_TRIP_MIN_SEEDS = 3
+HOLIDAY_TRIP_MAX_GAP_DAYS = 5
+HOLIDAY_TRIP_WINDOW_PAD_DAYS = 3
+# Generic words that must not act as a place-name link between a trip and a card line.
+HOLIDAY_TOKEN_STOPWORDS = {
+    "PAYMENT", "TERMINAL", "CARD", "SEQUENCE", "TRANSACTIEDATUM", "KAARTNUMMER", "VALUE",
+    "DATE", "REST", "RESTAURANT", "RESTAURANTE", "SUPER", "HOTEL", "APARTHOT", "SHOP",
+    "STORE", "CAFE", "PIZZERIA", "MERCADO", "SUPERMERCADO", "SUPERMARKT", "MARKET",
+    "PLAYA", "PLATJA", "CALLE", "AVENIDA", "PORT", "ZONA", "BASE", "AEREA", "PUNTO",
+    "TIENDA", "BOUTIQUE", "GELATERIA", "GELATS", "FARMACIA", "PARKING", "NULL",
+    "SPAIN", "ITALY", "FRANCE", "GREECE", "PORTUGAL", "CROATIA", "TURKEY", "AUSTRIA",
+    "SWITZERLAND", "MOROCCO", "CYPRUS", "MALTA", "EGYPT", "THAILAND", "INDONESIA",
+}
 DIRECT_DEBIT_CREDITOR_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}ZZZ[A-Z0-9]{8,}\b")
 RECURRING_DIRECT_DEBIT_MIN_OCCURRENCES = 6
 RECURRING_DIRECT_DEBIT_AMOUNT_TOLERANCE_PCT = 0.02
@@ -225,6 +273,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
     card_settlement_pairs = detect_card_settlement_pairs(transactions)
     refund_pairs = detect_refund_pairs(transactions)
     recurring_debit_groups = detect_recurring_direct_debits(transactions)
+    holiday_trips = detect_holiday_trips(transactions)
 
     linked_transfer_ids = set()
     for left_id, right_id, amount, kind, explanation in transfer_pairs:
@@ -275,6 +324,7 @@ def classify_all(conn: sqlite3.Connection) -> Dict[str, int]:
             linked_card_settlement_ids=linked_card_settlement_ids,
             refund_category_by_id=refund_category_by_id,
             recurring_debit_groups=recurring_debit_groups,
+            holiday_trips=holiday_trips,
             user_rules=user_rules,
             entity_hints=entity_hints,
         )
@@ -366,6 +416,7 @@ def classify_transaction(
     recurring_debit_groups: Dict[int, RecurringDebitGroup],
     user_rules: List[Dict],
     entity_hints: Optional[Dict[str, EntityHint]] = None,
+    holiday_trips: Optional[Dict[int, str]] = None,
 ) -> Annotation:
     raw_text = tx_text(tx)
     text = signal_text(tx)
@@ -402,6 +453,10 @@ def classify_transaction(
 
     if tx["id"] in card_settlement_set:
         return Annotation("internal_transfer", "Card Settlement", "", 0.97, "Matched bank/card settlement pair")
+
+    if holiday_trips and tx["id"] in holiday_trips:
+        trip = holiday_trips[tx["id"]]
+        return Annotation("household_spend", "Holiday", trip, 0.8, f"Summer holiday trip abroad: {trip}")
 
     if role == "credit_card":
         if amount > 0 and any(keyword in text for keyword in CREDIT_CARD_PAYMENT_KEYWORDS):
@@ -952,6 +1007,93 @@ def detect_recurring_direct_debits(transactions: List[Dict]) -> Dict[int, Recurr
         )
         for tx in items:
             result[tx["id"]] = group
+    return result
+
+
+def holiday_country(tx: Dict) -> str:
+    """Return the foreign country a transaction happened in, else ''.
+
+    Two reliable signals: a 3-letter country code on the debit "Payment terminal"
+    export, or a spelled-out foreign country name on the ABN world/debit export.
+    """
+    text = tx_text(tx)
+    if "PAYMENT TERMINAL" in text:
+        for code, country in HOLIDAY_COUNTRY_CODES.items():
+            if re.search(rf"\b{code}\b", text):
+                return country
+    for name, country in HOLIDAY_COUNTRY_NAMES.items():
+        if re.search(rf"\b{name}\b", text):
+            return country
+    return ""
+
+
+def is_holiday_domestic(text: str) -> bool:
+    if any(marker in text for marker in HOLIDAY_DOMESTIC_MARKERS):
+        return True
+    return any(re.search(rf"\b{re.escape(city)}\b", text) for city in HOLIDAY_DOMESTIC_CITIES)
+
+
+def detect_holiday_trips(transactions: List[Dict]) -> Dict[int, str]:
+    # Seeds are transactions with an explicit foreign country (code or name) in a
+    # holiday month; they cluster into trips. City-only card lines (a credit-card row
+    # that just says "CALA DOR") are absorbed when they fall in a trip window and are
+    # not domestic/online/cash -- domestic terminal rows that omit "NLD" are ruled out
+    # by the Dutch-city list so a Vomar-Amstelveen row never joins a Spain trip.
+    seeds: List[Tuple[date, str]] = []
+    for tx in transactions:
+        if tx["is_duplicate"] or float(tx["amount"]) >= 0:
+            continue
+        country = holiday_country(tx)
+        if not country:
+            continue
+        tx_date = parse_iso_date(tx["transaction_date"])
+        if tx_date.month not in HOLIDAY_TRIP_MONTHS:
+            continue
+        seeds.append((tx_date, country))
+
+    seeds.sort(key=lambda seed: (seed[1], seed[0]))
+    trips: List[Dict] = []
+    current: Optional[Dict] = None
+    for tx_date, country in seeds:
+        if (
+            current
+            and country == current["country"]
+            and (tx_date - current["end"]).days <= HOLIDAY_TRIP_MAX_GAP_DAYS
+        ):
+            current["end"] = tx_date
+            current["count"] += 1
+        else:
+            if current and current["count"] >= HOLIDAY_TRIP_MIN_SEEDS:
+                trips.append(current)
+            current = {"country": country, "start": tx_date, "end": tx_date, "count": 1}
+    if current and current["count"] >= HOLIDAY_TRIP_MIN_SEEDS:
+        trips.append(current)
+    for trip in trips:
+        trip["label"] = f"{trip['country']} {trip['start'].year}"
+
+    result: Dict[int, str] = {}
+    pad = timedelta(days=HOLIDAY_TRIP_WINDOW_PAD_DAYS)
+    for tx in transactions:
+        if tx["is_duplicate"] or float(tx["amount"]) >= 0:
+            continue
+        tx_date = parse_iso_date(tx["transaction_date"])
+        own_country = holiday_country(tx)
+        text = tx_text(tx)
+        for trip in trips:
+            if not (trip["start"] - pad <= tx_date <= trip["end"] + pad):
+                continue
+            if own_country == trip["country"]:
+                result[tx["id"]] = trip["label"]
+                break
+            if is_holiday_domestic(text):
+                continue
+            if any(marker in text for marker in HOLIDAY_ONLINE_MARKERS):
+                continue
+            if any(marker in text for marker in CASH_WITHDRAWAL_KEYWORDS):
+                continue
+            if any(marker in text for marker in HOLIDAY_TERMINAL_MARKERS):
+                result[tx["id"]] = trip["label"]
+                break
     return result
 
 
