@@ -22,7 +22,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null };
+const state = { spending: null, fire: null, optimization: null, period: "last13" };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -103,9 +103,15 @@ function renderTable(id, columns, rows) {
   `;
 }
 
+function periodQuery() {
+  const selector = document.getElementById("period-selector");
+  state.period = selector ? selector.value : state.period || "last13";
+  return encodeURIComponent(state.period);
+}
+
 async function loadFire() {
   const multiple = document.getElementById("fire-multiple").value || "25";
-  const data = await api(`/api/dashboard/fire?multiple=${encodeURIComponent(multiple)}`);
+  const data = await api(`/api/dashboard/fire?multiple=${encodeURIComponent(multiple)}&period=${periodQuery()}`);
   state.fire = data;
   const summary = data.summary;
   setText("monthly-burn", fmtMoney(summary.monthly_burn));
@@ -116,9 +122,32 @@ async function loadFire() {
   setText("investment-rate", fmtPercent(summary.investment_rate));
   setText("fi-multiple-label", `${summary.fire_multiple || multiple}x annual burn`);
   setText("runway-months", summary.runway_months ? `Runway ${Math.round(summary.runway_months)} months` : "Runway n/a");
+  renderPeriodOptions(data.available_years || []);
   renderBurnChart(data.months || []);
+  renderYearlyTable(data.years || []);
   renderHealth(data.data_health || {});
   renderTrustList(data.data_health || {});
+}
+
+function renderPeriodOptions(years) {
+  const selector = document.getElementById("period-selector");
+  if (!selector || selector.dataset.loadedYears === years.join(",")) return;
+  const current = selector.value || state.period || "last13";
+  selector.innerHTML = `
+    <option value="last13">Last 13 months</option>
+    <option value="ytd">YTD</option>
+    ${years.map((year) => `<option value="year:${escapeHtml(year)}">${escapeHtml(year)}</option>`).join("")}
+    <option value="all">All</option>
+  `;
+  selector.value = [...selector.options].some((option) => option.value === current) ? current : "last13";
+  selector.dataset.loadedYears = years.join(",");
+}
+
+function percentile(values, pct) {
+  const sorted = values.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+  if (!sorted.length) return 1;
+  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * pct) - 1);
+  return sorted[index];
 }
 
 function renderBurnChart(months) {
@@ -127,34 +156,40 @@ function renderBurnChart(months) {
     chart.innerHTML = `<p class="empty">No imported data yet.</p>`;
     return;
   }
-  const recent = months.slice(-12);
-  const max = Math.max(
-    ...recent.flatMap((row) => [
-      Number(row.real_income || 0),
-      Math.max(0, Number(row.household_spend_cashflow || 0)),
-    ]),
+  chart.classList.toggle("scroll-list", state.period === "all");
+  const scaleReference = Math.max(
+    percentile(months.flatMap((row) => [Number(row.regular_income || 0), Math.max(0, Number(row.household_spend_cashflow || 0))]), 0.9) * 1.2,
     1,
   );
-  chart.innerHTML = recent
+  chart.innerHTML = months
     .map((row) => {
+      const regular = Number(row.regular_income || 0);
+      const variable = Number(row.variable_income || 0);
       const income = Number(row.real_income || 0);
       const outflow = Number(row.household_spend_cashflow || 0);
       const net = Number(row.household_net_pnl ?? income - outflow);
       const cashMovement = Number(row.net_cash_change || 0);
-      const incomeWidth = income ? Math.max(2, Math.round((income / max) * 100)) : 0;
-      const outflowWidth = outflow > 0 ? Math.max(2, Math.round((outflow / max) * 100)) : 0;
+      const regularWidth = Math.min(100, Math.round((regular / scaleReference) * 100));
+      const variableWidth = regular >= scaleReference ? 0 : Math.min(100 - regularWidth, Math.round((variable / scaleReference) * 100));
+      const outflowWidth = outflow > 0 ? Math.min(100, Math.max(2, Math.round((outflow / scaleReference) * 100))) : 0;
+      const incomeOverflow = income > scaleReference;
+      const outflowOverflow = outflow > scaleReference;
       return `
         <div class="bar-row monthly-flow-row" title="${escapeHtml(monthTooltip(row))}">
-          <span>${escapeHtml(row.month)}</span>
+          <button class="month-link" data-month="${escapeHtml(row.month)}">${escapeHtml(row.month)}</button>
           <div class="bar-stack">
             <div class="flow-bar-line">
               <small>In</small>
-              <div class="bar-track"><div class="bar-fill income" style="width: ${incomeWidth}%"></div></div>
+              <div class="bar-track segmented">
+                <div class="bar-fill income regular" style="width: ${regularWidth}%"></div>
+                <div class="bar-fill income variable" style="width: ${variableWidth}%"></div>
+                ${incomeOverflow ? `<span class="overflow-marker">›</span>` : ""}
+              </div>
               <strong>${fmtMoney(income)}</strong>
             </div>
             <div class="flow-bar-line">
               <small>Out</small>
-              <div class="bar-track"><div class="bar-fill outflow" style="width: ${outflowWidth}%"></div></div>
+              <div class="bar-track"><div class="bar-fill outflow" style="width: ${outflowWidth}%"></div>${outflowOverflow ? `<span class="overflow-marker">›</span>` : ""}</div>
               <strong>${fmtMoney(outflow)}</strong>
             </div>
           </div>
@@ -168,22 +203,71 @@ function renderBurnChart(months) {
     .join("");
 }
 
-function monthTooltip(row) {
-  const income = Number(row.real_income || 0);
-  const outflow = Number(row.household_spend_cashflow || 0);
-  const grossOutflow = Number(row.household_outflow_gross || 0);
-  const refunds = Number(row.refunds || 0);
-  const reimbursements = Number(row.reimbursements_cleared || 0);
-  const net = Number(row.household_net_pnl ?? income - outflow);
-  const cashMovement = Number(row.net_cash_change || 0);
-  return [
-    `${row.month}`,
-    `IN ${fmtPrecise(income)}`,
-    `OUT ${fmtPrecise(outflow)} = gross household ${fmtPrecise(grossOutflow)} - refunds ${fmtPrecise(refunds)} - reimbursements cleared ${fmtPrecise(reimbursements)}`,
-    `NET ${fmtPrecise(net)} = IN - OUT`,
-    `Cash movement incl. transfers/investing ${fmtPrecise(cashMovement)}`,
-    `Invested ${fmtPrecise(row.wealth_allocation || 0)}; internal transfers ${fmtPrecise(row.internal_transfers || 0)}`,
-  ].join("\n");
+function renderYearlyTable(years) {
+  renderTable(
+    "yearly-table",
+    [
+      { key: "year", label: "Year" },
+      { key: "months", label: "Months", number: true },
+      { key: "regular_income", label: "Regular in", number: true, render: (row) => fmtPrecise(row.regular_income) },
+      { key: "variable_income", label: "Variable in", number: true, render: (row) => fmtPrecise(row.variable_income) },
+      { key: "real_income", label: "Total in", number: true, render: (row) => fmtPrecise(row.real_income) },
+      { key: "household_spend_cashflow", label: "Out", number: true, render: (row) => fmtPrecise(row.household_spend_cashflow) },
+      { key: "household_net_pnl", label: "Net", number: true, render: (row) => fmtPrecise(row.household_net_pnl) },
+      { key: "net_cash_change", label: "Cash", number: true, render: (row) => fmtPrecise(row.net_cash_change) },
+    ],
+    years,
+  );
+}
+
+async function renderMonthAudit(month) {
+  const panel = document.getElementById("month-audit-panel");
+  const list = document.getElementById("month-audit-list");
+  document.getElementById("month-audit-title").textContent = `${month} Audit`;
+  panel.classList.remove("hidden");
+  list.innerHTML = `<p class="empty">Loading month audit...</p>`;
+  const data = await api(`/api/month-audit?month=${encodeURIComponent(month)}`);
+  if (!data.rows.length) {
+    list.innerHTML = `<p class="empty">No household outflow rows for this month.</p>`;
+    return;
+  }
+  list.innerHTML = data.rows
+    .map((row) => `
+      <article class="audit-row ${row.link_state}">
+        <div>
+          <strong>${escapeHtml(row.normalized_merchant || row.counterparty_name || "Unknown")}</strong>
+          <span>${escapeHtml(row.transaction_date)} · ${fmtPrecise(Math.abs(row.amount))} gross · ${fmtPrecise(row.net_outflow)} net</span>
+          <small>${escapeHtml(row.category || "Uncategorized")} · ${escapeHtml(row.subcategory || "")} · ${escapeHtml(row.link_state)}</small>
+          <p>${escapeHtml(row.description || "")}</p>
+        </div>
+        <div class="audit-actions">
+          <button data-audit-action="link-inflow" data-transaction="${row.id}">Link inflow</button>
+          <button data-audit-action="tag-business" data-transaction="${row.id}">Business</button>
+          <button data-audit-action="classify" data-category="Education" data-subcategory="Professional Education" data-transaction="${row.id}">Education</button>
+          <button data-audit-action="classify" data-category="Holiday" data-subcategory="" data-transaction="${row.id}">Holiday</button>
+          <button data-audit-action="classify" data-category="Shopping" data-subcategory="" data-transaction="${row.id}">Shopping</button>
+          <button data-audit-action="classify" data-category="Other" data-subcategory="" data-transaction="${row.id}">Other</button>
+        </div>
+      </article>
+    `)
+    .join("");
+}
+
+async function handleAuditAction(button) {
+  const action = button.dataset.auditAction;
+  const txId = button.dataset.transaction;
+  const body = action === "classify" ? {
+    economic_class: "household_spend",
+    category: button.dataset.category,
+    subcategory: button.dataset.subcategory || "",
+  } : {};
+  button.disabled = true;
+  await api(`/api/transactions/${txId}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await refreshAll();
 }
 
 function renderTrustList(health) {
@@ -304,7 +388,7 @@ function renderAmortizations(rows) {
 }
 
 async function loadFlow() {
-  const data = await api("/api/dashboard/monthly-flow");
+  const data = await api(`/api/dashboard/monthly-flow?period=${periodQuery()}`);
   renderTable(
     "flow-table",
     [
@@ -324,7 +408,7 @@ async function loadFlow() {
 }
 
 async function loadSpending() {
-  const data = await api("/api/dashboard/spending");
+  const data = await api(`/api/dashboard/spending?period=${periodQuery()}`);
   state.spending = data;
   renderTable(
     "spending-table",
@@ -745,6 +829,14 @@ document.addEventListener("click", (event) => {
   if (event.target.matches("[data-amortization]")) {
     setAmortizationStatus(event.target);
   }
+  if (event.target.matches("[data-month]")) {
+    event.preventDefault();
+    renderMonthAudit(event.target.dataset.month);
+  }
+  if (event.target.matches("[data-audit-action]")) {
+    event.preventDefault();
+    handleAuditAction(event.target);
+  }
 });
 
 document.addEventListener("change", (event) => {
@@ -756,6 +848,7 @@ document.addEventListener("change", (event) => {
 document.getElementById("refresh-button").addEventListener("click", refreshAll);
 document.getElementById("entity-enrichment-button").addEventListener("click", runEntityEnrichment);
 document.getElementById("fire-multiple").addEventListener("change", loadFire);
+document.getElementById("period-selector").addEventListener("change", refreshAll);
 document.getElementById("transaction-search-button").addEventListener("click", loadTransactions);
 ["transaction-class", "transaction-category", "transaction-confidence"].forEach((id) => {
   document.getElementById(id).addEventListener("change", loadTransactions);

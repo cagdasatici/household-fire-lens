@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from .aggregation import (
     assert_monthly_pnl_identity,
     fire_snapshot,
+    filter_snapshots_for_period,
     list_amortization_rules,
     optimization_insights,
     recompute_monthly_snapshots,
@@ -150,14 +151,20 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json({"transactions": self.list_review_group_transactions(review_id)})
         elif path == "/api/dashboard/fire":
             fire_multiple = float((query.get("multiple") or ["25"])[0])
+            period = (query.get("period") or ["last13"])[0]
             recompute_monthly_snapshots(self.conn)
-            self.send_json(fire_snapshot(self.conn, fire_multiple))
+            self.send_json(fire_snapshot(self.conn, fire_multiple, period))
         elif path == "/api/dashboard/monthly-flow":
+            period = (query.get("period") or ["last13"])[0]
             months = recompute_monthly_snapshots(self.conn)
             assert_monthly_pnl_identity(months)
-            self.send_json({"months": months})
+            self.send_json({"months": filter_snapshots_for_period(months, period)})
         elif path == "/api/dashboard/spending":
-            self.send_json(spending_breakdown(self.conn))
+            period = (query.get("period") or ["last13"])[0]
+            self.send_json(spending_breakdown(self.conn, period))
+        elif path == "/api/month-audit":
+            month = (query.get("month") or [""])[0]
+            self.send_json({"month": month, "rows": self.month_audit(month)})
         elif path == "/api/dashboard/optimization":
             recompute_monthly_snapshots(self.conn)
             self.send_json(optimization_insights(self.conn))
@@ -246,7 +253,8 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         if display_name:
             self.conn.execute("UPDATE accounts SET display_name = ? WHERE id = ?", (display_name, account_id))
         self.conn.commit()
-        classify_all(self.conn)
+        if reclassify_after:
+            classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"account": fetch_one(self.conn, "SELECT * FROM accounts WHERE id = ?", (account_id,))})
 
@@ -441,6 +449,120 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             """,
             tuple(params),
         )
+
+    def month_audit(self, month: str) -> Any:
+        if not month or len(month) != 7:
+            return []
+        rows = fetch_all(
+            self.conn,
+            """
+            SELECT
+                nt.id, nt.transaction_date, nt.amount, nt.currency, nt.normalized_merchant,
+                nt.counterparty_name, nt.description,
+                a.display_name AS account_name,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.explanation,
+                COALESCE(SUM(CASE WHEN tl.link_type = 'expense_reimbursement' THEN tl.amount ELSE 0 END), 0) AS linked_reimbursement,
+                GROUP_CONCAT(CASE WHEN tl.link_type = 'expense_reimbursement' THEN tl.from_transaction_id END) AS linked_inflows
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            LEFT JOIN transaction_links tl ON tl.to_transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND substr(nt.transaction_date, 1, 7) = ?
+              AND nt.amount < 0
+              AND ta.economic_class IN ('household_spend', 'debt_service')
+            GROUP BY nt.id
+            ORDER BY ABS(nt.amount) DESC, nt.transaction_date, nt.id
+            """,
+            (month,),
+        )
+        for row in rows:
+            gross = abs(float(row["amount"] or 0))
+            linked = float(row["linked_reimbursement"] or 0)
+            row["net_outflow"] = max(0.0, gross - linked)
+            row["link_state"] = "linked" if linked else "open"
+        return rows
+
+    def handle_transaction_action(self, tx_id: int, action: str) -> None:
+        body = self.read_json()
+        reclassify_after = True
+        if action == "link-inflow":
+            linked = self.link_transaction_to_best_inflow(tx_id)
+            if not linked:
+                self.send_json({"error": "No matching inflow found within 60 days."}, status=HTTPStatus.NOT_FOUND)
+                return
+            reclassify_after = False
+        else:
+            if action == "tag-business":
+                economic_class = "household_spend"
+                category = "Business Expense"
+                subcategory = "Reimbursable"
+            else:
+                economic_class = body.get("economic_class", "household_spend")
+                category = body.get("category", "Other")
+                subcategory = body.get("subcategory", "")
+            create_rule_from_review(self.conn, tx_id, economic_class, category, subcategory)
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO transaction_annotations (
+                    transaction_id, economic_class, category, subcategory, confidence, rule_id,
+                    review_status, digest_tier, explanation, updated_at
+                ) VALUES (?, ?, ?, ?, 0.99, NULL, 'reviewed', 'reviewed', 'Month audit decision', CURRENT_TIMESTAMP)
+                """,
+                (tx_id, economic_class, category, subcategory),
+            )
+        self.conn.commit()
+        if reclassify_after:
+            classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"ok": True})
+
+    def link_transaction_to_best_inflow(self, tx_id: int) -> bool:
+        outflow = self.conn.execute(
+            "SELECT id, transaction_date, amount FROM normalized_transactions WHERE id = ? AND amount < 0",
+            (tx_id,),
+        ).fetchone()
+        if not outflow:
+            return False
+        amount = abs(float(outflow["amount"]))
+        candidates = self.conn.execute(
+            """
+            SELECT nt.id, nt.transaction_date, nt.amount
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND nt.amount > 0
+              AND ABS(nt.amount - ?) <= MAX(1.0, ? * 0.02)
+              AND nt.transaction_date >= ?
+              AND nt.transaction_date <= date(?, '+60 days')
+              AND ta.economic_class NOT IN ('internal_transfer', 'wealth_allocation')
+            ORDER BY ABS(nt.amount - ?) ASC, nt.transaction_date, nt.id
+            LIMIT 1
+            """,
+            (amount, amount, outflow["transaction_date"], outflow["transaction_date"], amount),
+        ).fetchone()
+        if not candidates:
+            return False
+        linked_amount = min(amount, float(candidates["amount"]))
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO transaction_links (
+                link_type, from_transaction_id, to_transaction_id, amount, confidence, explanation
+            ) VALUES ('expense_reimbursement', ?, ?, ?, 0.99, 'User-linked from month audit')
+            """,
+            (candidates["id"], tx_id, linked_amount),
+        )
+        self.conn.execute(
+            """
+            UPDATE transaction_annotations
+            SET economic_class = 'reimbursement_pass_through', category = 'Reimbursements',
+                subcategory = 'Expense Offset', confidence = 0.99, digest_tier = 'reviewed',
+                explanation = 'User-linked reimbursement from month audit', updated_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = ?
+            """,
+            (candidates["id"],),
+        )
+        return True
 
     def list_review_items(self) -> Any:
         rows = fetch_all(

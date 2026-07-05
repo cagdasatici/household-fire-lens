@@ -26,18 +26,19 @@ ECONOMIC_CLASSES = {
 
 
 MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
-    (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK", "VOMAR", "DEKAMARKT", "HOOGVLIET"), "Groceries", ""),
-    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA", "TROUBADOUR"), "Eating Out", ""),
-    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE", "TURKISH AIRLINES", "LANDAL"), "Holiday", ""),
+    (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK", "VOMAR", "DEKAMARKT", "HOOGVLIET", "NATUURLIJKBESTELD", "HAARLEM TEA"), "Groceries", ""),
+    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA", "TROUBADOUR", "SUSHI"), "Eating Out", ""),
+    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE", "TURKISH AIRLINES", "LANDAL", "PEGASUS", "AJET HAVA"), "Holiday", ""),
     (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE", "AUTO BEDRIJF", "AUTOBEDR", "FIETSVOORDEEL", "YELLOWBRICK"), "Transportation", ""),
-    (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION"), "Subscriptions", ""),
+    (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION", "OPENAI", "CHATGPT", "DPG MEDIA"), "Subscriptions", ""),
     (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO", "ETECK", "POWERPEERS", "VANDEBRON", "FRANK ENERGIE"), "Housing", "Utilities"),
     (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN ", "NATIONALE NED", "TAF BV", "RISK VERZEKERINGEN"), "Housing", "Insurance"),
-    (("MEUBEL", "HENDERS EN HAZEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT", "RUITER DAKKAPELLEN", "SOLAR TOTAAL", "STUKADOOR", "VUGTS ZONWERING", "MOOI MAKELAARDIJ"), "Home and Furniture", "Home Improvement"),
+    (("MEUBEL", "HENDERS EN HAZEL", "DE RUIJTER MEUBEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT", "RUITER DAKKAPELLEN", "SOLAR TOTAAL", "STUKADOOR", "VUGTS ZONWERING", "MOOI MAKELAARDIJ"), "Home and Furniture", "Home Improvement"),
     (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "DIERENARTS", "VETERINARY", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER", "SPORTCITY", "HEALTH CLUB", "AMSTELHOF SPORT"), "Health", ""),
-    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION", "UNIQLO", "LIMANGO", "WEHKAMP", "WE FASHION"), "Shopping", ""),
+    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION", "UNIQLO", "LIMANGO", "WEHKAMP", "WE FASHION", "BAMBULAB", "ARTENCRAFT", "BEEKMAN B.V.", "ONE2TRACK"), "Shopping", ""),
     (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP", "PUBLIEKSZAKEN"), "Taxes and Government", ""),
-    (("KINDERRIJK", "CODERMINDS", "MW IS SMITS", "BCML ENTERPRISE", "I TURN", "SQUALA", "SQULA", "DANCE WAREHOUSE"), "Education", "Kids Activities"),
+    (("KINDERRIJK", "CODERMINDS", "MW IS SMITS", "BCML ENTERPRISE", "I TURN", "SQUALA", "SQULA", "DANCE WAREHOUSE", "ACTIVITEITENCOMMISSIE OBS TWICKEL", "DOZZI VIA TIKKIE"), "Education", "Kids Activities"),
+    (("EMERITUS", "MIT XPRO", "CAMBRIDGE"), "Education", "Professional Education"),
     (("HAPPY VALLEY", "DIERENPENSION"), "Pet Care", ""),
 ]
 
@@ -410,7 +411,7 @@ def classify_transaction(
             return Annotation("refund", category or "Other", subcategory, 0.76, "Credit-card refund or merchant credit")
         category, subcategory, confidence, explanation = categorize_merchant(merchant_text)
         if category:
-            return Annotation("household_spend", category, subcategory, confidence, explanation)
+            return Annotation("household_spend", category, subcategory or "Card Spend", confidence, explanation)
         return Annotation("household_spend", "Other", "Card Spend", 0.62, "Imported credit-card transaction")
 
     if role == "wise":
@@ -615,11 +616,23 @@ def signal_text(tx: Dict) -> str:
 
 
 def merchant_match_text(tx: Dict) -> str:
-    return re.sub(
-        r"\s+",
-        " ",
-        " ".join(str(part or "").upper() for part in [tx.get("counterparty_name"), tx.get("normalized_merchant")]),
-    ).strip()
+    paypal_merchant = extract_paypal_merchant(tx)
+    parts = [paypal_merchant, tx.get("counterparty_name"), tx.get("normalized_merchant")]
+    return re.sub(r"\s+", " ", " ".join(str(part or "").upper() for part in parts)).strip()
+
+
+def extract_paypal_merchant(tx: Dict) -> str:
+    raw = " ".join(str(part or "") for part in [tx.get("counterparty_name"), tx.get("normalized_merchant"), tx.get("description")]).upper()
+    if "PAYPAL" not in raw:
+        return ""
+    text = clean_signal_text(raw)
+    match = re.search(r"PAYPAL\s+([A-Z0-9&.+ ]{3,60})", text)
+    if not match:
+        return ""
+    merchant = match.group(1)
+    merchant = re.split(r"\b(IBAN|REFERENCE|KENMERK|VALUE|DATE|EUROPE|S\.?A|SARL|ET|CIE|SCA)\b", merchant, maxsplit=1)[0]
+    merchant = re.sub(r"[^A-Z0-9&.+ ]+", " ", merchant)
+    return re.sub(r"\s+", " ", merchant).strip()
 
 
 def tx_month(tx: Dict) -> str:
@@ -992,6 +1005,8 @@ def link_one_off_inflows(conn: sqlite3.Connection) -> None:
     for row in rows:
         tx = dict(row)
         text = signal_text(tx)
+        if not protected_income_for_amount_link(tx) and link_expense_reimbursement(conn, tx):
+            continue
         if known_structural_inflow(tx) and tx["economic_class"] != "refund":
             continue
         linked = False
@@ -1002,6 +1017,96 @@ def link_one_off_inflows(conn: sqlite3.Connection) -> None:
         if known_structural_inflow(tx):
             continue
         mark_one_off_inflow_for_review(conn, tx)
+
+
+def protected_income_for_amount_link(tx: Dict) -> bool:
+    if tx.get("economic_class") in {"wealth_allocation", "internal_transfer", "refund", "ignore_noise"}:
+        return True
+    category = tx.get("category") or ""
+    subcategory = tx.get("subcategory") or ""
+    if category == "Income" and subcategory in {"Salary", "Cash Bonus"}:
+        return True
+    if category == "Equity Compensation" and subcategory == "RSU":
+        return True
+    if category == "Benefits" and subcategory == "Child Benefit":
+        return True
+    if category == "Interest":
+        return True
+    text = signal_text(tx)
+    return any(keyword in text for keyword in SALARY_KEYWORDS + BONUS_KEYWORDS)
+
+
+def link_expense_reimbursement(conn: sqlite3.Connection, inflow: Dict) -> bool:
+    inflow_amount = float(inflow["amount"])
+    inflow_date = parse_iso_date(inflow["transaction_date"])
+    start_date = date.fromordinal(inflow_date.toordinal() - 60).isoformat()
+    candidates = conn.execute(
+        """
+        SELECT
+            nt.id, nt.transaction_date, nt.amount, nt.description, nt.normalized_merchant,
+            ta.category, ta.subcategory,
+            ABS(ABS(nt.amount) - ?) AS amount_delta
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND ABS(ABS(nt.amount) - ?) <= MAX(1.0, ? * 0.02)
+          AND nt.transaction_date <= ?
+          AND nt.transaction_date >= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM transaction_links tl
+            WHERE tl.link_type = 'expense_reimbursement'
+              AND (tl.from_transaction_id = nt.id OR tl.to_transaction_id = nt.id)
+          )
+        ORDER BY amount_delta ASC, nt.transaction_date DESC, nt.id
+        LIMIT 1
+        """,
+        (inflow_amount, inflow_amount, inflow_amount, inflow["transaction_date"], start_date),
+    ).fetchall()
+    best = None
+    for row in candidates:
+        candidate_date = parse_iso_date(row["transaction_date"])
+        if 0 <= (inflow_date - candidate_date).days <= 60:
+            best = row
+            break
+    if not best:
+        return False
+
+    confidence = 0.98 if float(best["amount_delta"] or 0) < 0.01 else 0.92
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO transaction_links (
+            link_type, from_transaction_id, to_transaction_id, amount, confidence, explanation
+        ) VALUES ('expense_reimbursement', ?, ?, ?, ?, ?)
+        """,
+        (
+            inflow["id"],
+            best["id"],
+            min(inflow_amount, abs(float(best["amount"]))),
+            confidence,
+            f"Matched one-off inflow to prior outflow {best['id']} by amount within 60 days",
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE transaction_annotations
+        SET economic_class = 'reimbursement_pass_through',
+            category = 'Reimbursements',
+            subcategory = 'Expense Offset',
+            confidence = ?,
+            digest_tier = 'auto_visible',
+            explanation = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = ?
+        """,
+        (
+            confidence,
+            f"Matched reimbursement to transaction {best['id']} ({best['normalized_merchant'] or best['description'] or 'prior outflow'})",
+            inflow["id"],
+        ),
+    )
+    return True
 
 
 def known_structural_inflow(tx: Dict) -> bool:
@@ -1023,6 +1128,7 @@ def known_structural_inflow(tx: Dict) -> bool:
 def link_subsidy_offset(conn: sqlite3.Connection, inflow: Dict) -> bool:
     inflow_amount = float(inflow["amount"])
     inflow_date = parse_iso_date(inflow["transaction_date"])
+    start_date = date.fromordinal(inflow_date.toordinal() - 60).isoformat()
     candidates = conn.execute(
         """
         SELECT

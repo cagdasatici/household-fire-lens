@@ -684,3 +684,100 @@ pre {
     grid-column: 2;
   }
 }
+
+.month-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0;
+  text-align: left;
+}
+
+.month-link:hover {
+  color: var(--accent-2);
+}
+
+.bar-chart.scroll-list {
+  max-height: 720px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.bar-track.segmented {
+  display: flex;
+  position: relative;
+}
+
+.bar-fill.income.regular {
+  background: linear-gradient(90deg, #38d39f, #8ee6c7);
+  flex: 0 0 auto;
+}
+
+.bar-fill.income.variable {
+  background: linear-gradient(90deg, #5d8dff, #b2c7ff);
+  flex: 0 0 auto;
+}
+
+.overflow-marker {
+  color: #f8fafc;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 20px;
+  position: absolute;
+  right: 6px;
+  top: 0;
+}
+
+.hidden {
+  display: none;
+}
+
+.audit-list {
+  display: grid;
+  gap: 10px;
+  max-height: 720px;
+  overflow: auto;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid #22303b;
+  border-radius: 8px;
+  background: #101820;
+}
+
+.audit-row.linked {
+  border-color: rgba(56, 211, 159, 0.45);
+}
+
+.audit-row strong,
+.audit-row span,
+.audit-row small,
+.audit-row p {
+  display: block;
+}
+
+.audit-row span,
+.audit-row small,
+.audit-row p {
+  color: var(--muted);
+}
+
+.audit-row p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.audit-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(92px, 1fr));
+  gap: 8px;
+  align-content: start;
+}

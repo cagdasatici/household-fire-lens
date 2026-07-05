@@ -66,15 +66,18 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
         conn.execute(
             """
             INSERT INTO monthly_snapshots (
-                month, real_income, household_outflow_gross, household_spend_cashflow, household_spend_normalized,
-                household_net_pnl, mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
-                reimbursements_received, reimbursements_cleared, refunds, net_cash_change,
+                month, real_income, regular_income, variable_income, household_outflow_gross,
+                household_spend_cashflow, household_spend_normalized, household_net_pnl,
+                mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
+                reimbursements_received, reimbursements_cleared, linked_reimbursements, refunds, net_cash_change,
                 savings_rate_cashflow, savings_rate_fire
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 month,
                 money(real_income),
+                money(values["regular_income"]),
+                money(values["variable_income"]),
                 money(gross_outflow),
                 money(cashflow_burn),
                 money(max(0, normalized_burn)),
@@ -84,6 +87,7 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
                 money(values["internal_transfers"]),
                 money(values["reimbursements_received"]),
                 money(values["reimbursements_cleared"]),
+                money(values["linked_reimbursements"]),
                 money(values["refunds"]),
                 money(values["net_cash_change"]),
                 savings_rate_cashflow,
@@ -102,7 +106,8 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
             substr(nt.transaction_date, 1, 7) AS month,
             nt.amount,
             ta.economic_class,
-            ta.category
+            ta.category,
+            ta.subcategory
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
@@ -119,7 +124,12 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
         category = row["category"] or ""
         months[month]["net_cash_change"] += amount
         if cls == "income":
-            months[month]["real_income"] += max(amount, 0)
+            inflow = max(amount, 0)
+            months[month]["real_income"] += inflow
+            if category in {"Equity Compensation"} or (row["subcategory"] or "") in {"Cash Bonus", "RSU"}:
+                months[month]["variable_income"] += inflow
+            else:
+                months[month]["regular_income"] += inflow
         elif cls == "household_spend":
             spend = abs(min(amount, 0))
             months[month]["household_spend"] += spend
@@ -138,12 +148,95 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
         elif cls == "refund":
             months[month]["refunds"] += max(amount, 0)
 
+    apply_linked_reimbursements(conn, months)
     apply_reimbursement_fifo(months, unknown_card_spend)
+    apply_business_reimbursement_fifo(conn, months)
     for month, values in months.items():
         values["amortized_cashflow_replaced"] = 0.0
         values["amortized_monthly_addition"] = 0.0
     apply_amortization(conn, months)
     return months
+
+
+def apply_linked_reimbursements(conn: sqlite3.Connection, months: Dict[str, Dict[str, float]]) -> None:
+    rows = conn.execute(
+        """
+        SELECT
+            substr(outflow.transaction_date, 1, 7) AS month,
+            substr(inflow.transaction_date, 1, 7) AS inflow_month,
+            SUM(MIN(tl.amount, ABS(outflow.amount))) AS amount
+        FROM transaction_links tl
+        JOIN normalized_transactions outflow ON outflow.id = tl.to_transaction_id
+        JOIN normalized_transactions inflow ON inflow.id = tl.from_transaction_id
+        WHERE tl.link_type = 'expense_reimbursement'
+        GROUP BY substr(outflow.transaction_date, 1, 7), substr(inflow.transaction_date, 1, 7)
+        """
+    ).fetchall()
+    for row in rows:
+        month = row["month"]
+        amount = float(row["amount"] or 0)
+        months[month]["linked_reimbursements"] += amount
+        months[month]["reimbursements_cleared"] += amount
+        months[row["inflow_month"]]["reimbursement_paybacks_used"] += amount
+
+
+def apply_business_reimbursement_fifo(conn: sqlite3.Connection, months: Dict[str, Dict[str, float]]) -> None:
+    candidate_rows = conn.execute(
+        """
+        SELECT substr(nt.transaction_date, 1, 7) AS month, SUM(ABS(nt.amount)) AS amount
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ta.economic_class = 'household_spend'
+          AND ta.category IN ('Holiday', 'Transportation', 'Education')
+          AND NOT EXISTS (
+            SELECT 1 FROM transaction_links tl
+            WHERE tl.link_type = 'expense_reimbursement'
+              AND tl.to_transaction_id = nt.id
+          )
+        GROUP BY substr(nt.transaction_date, 1, 7)
+        ORDER BY month
+        """
+    ).fetchall()
+    reimbursement_rows = conn.execute(
+        """
+        SELECT substr(nt.transaction_date, 1, 7) AS month, SUM(nt.amount) AS amount
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount > 0
+          AND ta.economic_class = 'reimbursement_pass_through'
+          AND ta.subcategory IN ('Company Expense', 'Expense Offset', 'Booking.com')
+          AND NOT EXISTS (
+            SELECT 1 FROM transaction_links tl
+            WHERE tl.link_type = 'expense_reimbursement'
+              AND tl.from_transaction_id = nt.id
+          )
+        GROUP BY substr(nt.transaction_date, 1, 7)
+        ORDER BY month
+        """
+    ).fetchall()
+    spend_by_month = {row["month"]: float(row["amount"] or 0) for row in candidate_rows}
+    reimbursement_by_month = {row["month"]: float(row["amount"] or 0) for row in reimbursement_rows}
+    pending_spend: List[List[Any]] = []
+    all_months = sorted(set(months) | set(spend_by_month) | set(reimbursement_by_month))
+    for month in all_months:
+        if spend_by_month.get(month, 0) > 0:
+            pending_spend.append([month, spend_by_month[month]])
+        reimbursement = max(0.0, reimbursement_by_month.get(month, 0) - months[month]["reimbursement_paybacks_used"])
+        while reimbursement > 0.005 and pending_spend:
+            spend_month, open_amount = pending_spend[0]
+            cleared = min(reimbursement, open_amount)
+            months[spend_month]["reimbursements_cleared"] += cleared
+            months[spend_month]["business_reimbursements"] += cleared
+            months[month]["reimbursement_paybacks_used"] += cleared
+            reimbursement -= cleared
+            open_amount -= cleared
+            if open_amount <= 0.005:
+                pending_spend.pop(0)
+            else:
+                pending_spend[0][1] = open_amount
 
 
 def apply_reimbursement_fifo(months: Dict[str, Dict[str, float]], unknown_card_spend: Dict[str, float]) -> None:
@@ -152,11 +245,12 @@ def apply_reimbursement_fifo(months: Dict[str, Dict[str, float]], unknown_card_s
         if unknown_card_spend[month] > 0:
             pending_spend.append([month, unknown_card_spend[month]])
 
-        reimbursement = months[month]["reimbursements_received"]
+        reimbursement = max(0.0, months[month]["reimbursements_received"] - months[month]["reimbursement_paybacks_used"])
         while reimbursement > 0.005 and pending_spend:
             spend_month, open_amount = pending_spend[0]
             cleared = min(reimbursement, open_amount)
             months[spend_month]["reimbursements_cleared"] += cleared
+            months[month]["reimbursement_paybacks_used"] += cleared
             reimbursement -= cleared
             open_amount -= cleared
             if open_amount <= 0.005:
@@ -259,9 +353,51 @@ def assert_monthly_pnl_identity(snapshots: List[Dict[str, Any]]) -> None:
             )
 
 
-def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict[str, Any]:
-    snapshots = list_monthly_snapshots(conn)
-    assert_monthly_pnl_identity(snapshots)
+def yearly_snapshots(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for row in snapshots:
+        year = str(row["month"])[:4]
+        for key in (
+            "real_income", "regular_income", "variable_income", "household_spend_cashflow",
+            "household_net_pnl", "household_spend_normalized", "net_cash_change",
+            "wealth_allocation", "internal_transfers", "reimbursements_cleared", "linked_reimbursements", "refunds"
+        ):
+            grouped[year][key] += float(row.get(key) or 0)
+        grouped[year]["months"] += 1
+    years = []
+    for year, values in sorted(grouped.items()):
+        net = values["real_income"] - values["household_spend_cashflow"]
+        if abs(values["household_net_pnl"] - net) >= 0.01:
+            raise AssertionError(f"Yearly P&L identity failed for {year}")
+        item = {"year": year, "months": int(values["months"])}
+        for key, value in values.items():
+            if key != "months":
+                item[key] = money(value)
+        years.append(item)
+    return years
+
+
+def filter_snapshots_for_period(snapshots: List[Dict[str, Any]], period: str = "last13") -> List[Dict[str, Any]]:
+    if not snapshots:
+        return []
+    period = period or "last13"
+    if period == "all":
+        return snapshots
+    if period == "last13":
+        return snapshots[-13:]
+    latest_year = str(snapshots[-1]["month"])[:4]
+    if period == "ytd":
+        return [row for row in snapshots if str(row["month"]).startswith(latest_year)]
+    if period.startswith("year:"):
+        year = period.split(":", 1)[1]
+        return [row for row in snapshots if str(row["month"]).startswith(year)]
+    return snapshots[-13:]
+
+
+def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0, period: str = "last13") -> Dict[str, Any]:
+    all_snapshots = list_monthly_snapshots(conn)
+    assert_monthly_pnl_identity(all_snapshots)
+    snapshots = filter_snapshots_for_period(all_snapshots, period)
     if not snapshots:
         return {
             "months": [],
@@ -277,7 +413,7 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict
             },
             "data_health": data_health(conn),
         }
-    recent = snapshots[-12:]
+    recent = snapshots
     count = len(recent)
     income = sum(float(row["real_income"]) for row in recent)
     normalized = sum(float(row["household_spend_normalized"]) for row in recent)
@@ -288,6 +424,10 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict
     investment_rate = (wealth / income) if income else None
     return {
         "months": snapshots,
+        "all_months": all_snapshots,
+        "years": yearly_snapshots(snapshots),
+        "available_years": sorted({str(row["month"])[:4] for row in all_snapshots}),
+        "period": period,
         "summary": {
             "monthly_burn": money(monthly_burn),
             "annualized_burn": money(annualized_burn),
@@ -303,7 +443,15 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict
     }
 
 
-def spending_breakdown(conn: sqlite3.Connection) -> Dict[str, Any]:
+def period_bounds_from_snapshots(conn: sqlite3.Connection, period: str = "last13") -> Tuple[str, str]:
+    snapshots = filter_snapshots_for_period(list_monthly_snapshots(conn), period)
+    if not snapshots:
+        return "0000-00", "9999-99"
+    return snapshots[0]["month"], snapshots[-1]["month"]
+
+
+def spending_breakdown(conn: sqlite3.Connection, period: str = "last13") -> Dict[str, Any]:
+    start_month, end_month = period_bounds_from_snapshots(conn, period)
     rows = conn.execute(
         """
         SELECT
@@ -317,9 +465,11 @@ def spending_breakdown(conn: sqlite3.Connection) -> Dict[str, Any]:
         FROM normalized_transactions nt
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
         GROUP BY ta.economic_class, ta.category, ta.subcategory
         ORDER BY outflow DESC, inflow DESC
-        """
+        """,
+        (start_month, end_month),
     ).fetchall()
     category_months = conn.execute(
         """
@@ -331,9 +481,11 @@ def spending_breakdown(conn: sqlite3.Connection) -> Dict[str, Any]:
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
           AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
         GROUP BY month, category
         ORDER BY month, category
-        """
+        """,
+        (start_month, end_month),
     ).fetchall()
     return {
         "breakdown": [dict(row) for row in rows],

@@ -41,6 +41,14 @@
         </div>
         <div class="toolbar">
           <label class="compact-field">
+            <span>Period</span>
+            <select id="period-selector">
+              <option value="last13">Last 13 months</option>
+              <option value="ytd">YTD</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label class="compact-field">
             <span>FIRE multiple</span>
             <input id="fire-multiple" type="number" value="25" min="15" max="60" step="1" />
           </label>
@@ -96,6 +104,22 @@
             </div>
             <div id="trust-list" class="signal-list"></div>
           </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Yearly P&L</h3>
+            <span>Same identity, aggregated by year</span>
+          </div>
+          <div class="table-wrap">
+            <table id="yearly-table"></table>
+          </div>
+        </div>
+        <div id="month-audit-panel" class="panel hidden">
+          <div class="panel-heading">
+            <h3 id="month-audit-title">Month Audit</h3>
+            <span>Outflow decomposition, linked reimbursements, and one-click fixes</span>
+          </div>
+          <div id="month-audit-list" class="audit-list"></div>
         </div>
       </section>
 
