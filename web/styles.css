@@ -361,6 +361,24 @@ th.number {
   gap: 8px;
 }
 
+.drilldown-line {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 2px 3px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.drilldown-line:hover,
+.drilldown-line:focus-visible {
+  border-color: rgba(240, 184, 76, 0.45);
+  background: rgba(240, 184, 76, 0.08);
+  outline: none;
+}
+
 .flow-bar-line small {
   color: var(--muted);
   font-weight: 800;
@@ -743,6 +761,35 @@ pre {
   overflow: auto;
 }
 
+.audit-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.audit-category-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.audit-category-strip span {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101820;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.audit-category-strip strong {
+  color: var(--text);
+}
+
 .audit-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -775,9 +822,27 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.audit-row .audit-why {
+  font-size: 12px;
+}
+
 .audit-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(92px, 1fr));
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
   gap: 8px;
   align-content: start;
+}
+
+@media (max-width: 900px) {
+  .audit-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

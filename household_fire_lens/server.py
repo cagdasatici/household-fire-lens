@@ -105,6 +105,12 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 self.handle_reclassify()
             elif parsed.path == "/api/entity-enrichment/run":
                 self.handle_entity_enrichment()
+            elif parsed.path.startswith("/api/transactions/"):
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) != 4 or parts[0] != "api" or parts[1] != "transactions":
+                    self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+                self.handle_transaction_action(int(parts[2]), parts[3])
             else:
                 self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:  # pragma: no cover
@@ -484,6 +490,9 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         return rows
 
     def handle_transaction_action(self, tx_id: int, action: str) -> None:
+        if action not in {"classify", "link-inflow", "tag-business"}:
+            self.send_json({"error": "Unsupported transaction action."}, status=HTTPStatus.BAD_REQUEST)
+            return
         body = self.read_json()
         reclassify_after = True
         if action == "link-inflow":

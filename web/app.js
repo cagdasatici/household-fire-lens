@@ -22,7 +22,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13" };
+const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -187,11 +187,11 @@ function renderBurnChart(months) {
               </div>
               <strong>${fmtMoney(income)}</strong>
             </div>
-            <div class="flow-bar-line">
+            <button class="flow-bar-line drilldown-line" data-month="${escapeHtml(row.month)}" aria-label="Drill into ${escapeHtml(row.month)} out transactions">
               <small>Out</small>
               <div class="bar-track"><div class="bar-fill outflow" style="width: ${outflowWidth}%"></div>${outflowOverflow ? `<span class="overflow-marker">›</span>` : ""}</div>
               <strong>${fmtMoney(outflow)}</strong>
-            </div>
+            </button>
           </div>
           <div class="flow-net">
             <strong class="${net >= 0 ? "positive" : "negative"}">${fmtMoney(net)}</strong>
@@ -245,7 +245,8 @@ function renderYearlyTable(years) {
 async function renderMonthAudit(month) {
   const panel = document.getElementById("month-audit-panel");
   const list = document.getElementById("month-audit-list");
-  document.getElementById("month-audit-title").textContent = `${month} Audit`;
+  state.auditMonth = month;
+  document.getElementById("month-audit-title").textContent = `${month} OUT Drilldown`;
   panel.classList.remove("hidden");
   list.innerHTML = `<p class="empty">Loading month audit...</p>`;
   const data = await api(`/api/month-audit?month=${encodeURIComponent(month)}`);
@@ -253,33 +254,66 @@ async function renderMonthAudit(month) {
     list.innerHTML = `<p class="empty">No household outflow rows for this month.</p>`;
     return;
   }
-  list.innerHTML = data.rows
+  const rows = data.rows || [];
+  const grossTotal = rows.reduce((sum, row) => sum + Math.abs(Number(row.amount || 0)), 0);
+  const linkedTotal = rows.reduce((sum, row) => sum + Number(row.linked_reimbursement || 0), 0);
+  const netTotal = rows.reduce((sum, row) => sum + Number(row.net_outflow || 0), 0);
+  const categoryTotals = rows.reduce((totals, row) => {
+    const key = row.category || "Uncategorized";
+    totals.set(key, (totals.get(key) || 0) + Number(row.net_outflow || 0));
+    return totals;
+  }, new Map());
+  list.innerHTML = rows.length
+    ? `
+      <div class="audit-summary">
+        ${signal("Net OUT", fmtPrecise(netTotal), "After linked reimbursements")}
+        ${signal("Gross OUT", fmtPrecise(grossTotal), "Before refund/reimbursement netting")}
+        ${signal("Linked back", fmtPrecise(linkedTotal), "Cleared from company/refunds")}
+      </div>
+      <div class="audit-category-strip">
+        ${[...categoryTotals.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([category, value]) => `<span><strong>${escapeHtml(category)}</strong>${fmtPrecise(value)}</span>`)
+          .join("")}
+      </div>
+    `
+    : "";
+  list.innerHTML += rows
     .map((row) => `
       <article class="audit-row ${row.link_state}">
         <div>
           <strong>${escapeHtml(row.normalized_merchant || row.counterparty_name || "Unknown")}</strong>
           <span>${escapeHtml(row.transaction_date)} · ${fmtPrecise(Math.abs(row.amount))} gross · ${fmtPrecise(row.net_outflow)} net</span>
-          <small>${escapeHtml(row.category || "Uncategorized")} · ${escapeHtml(row.subcategory || "")} · ${escapeHtml(row.link_state)}</small>
+          <small>${escapeHtml(row.account_name || "Account")} · ${escapeHtml(row.category || "Uncategorized")} · ${escapeHtml(row.subcategory || "")} · ${escapeHtml(row.link_state)} · confidence ${fmtPercent(row.confidence)}</small>
           <p>${escapeHtml(row.description || "")}</p>
+          <p class="audit-why">${escapeHtml(row.explanation || "")}</p>
         </div>
         <div class="audit-actions">
           <button data-audit-action="link-inflow" data-transaction="${row.id}">Link inflow</button>
           <button data-audit-action="tag-business" data-transaction="${row.id}">Business</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Groceries" data-subcategory="" data-transaction="${row.id}">Groceries</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Eating Out" data-subcategory="" data-transaction="${row.id}">Eating out</button>
           <button data-audit-action="classify" data-category="Education" data-subcategory="Professional Education" data-transaction="${row.id}">Education</button>
           <button data-audit-action="classify" data-category="Holiday" data-subcategory="" data-transaction="${row.id}">Holiday</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Home and Furniture" data-subcategory="" data-transaction="${row.id}">Home</button>
           <button data-audit-action="classify" data-category="Shopping" data-subcategory="" data-transaction="${row.id}">Shopping</button>
           <button data-audit-action="classify" data-category="Other" data-subcategory="" data-transaction="${row.id}">Other</button>
+          <button data-audit-action="classify" data-class="debt_service" data-category="Housing" data-subcategory="Mortgage" data-transaction="${row.id}">Mortgage</button>
+          <button data-audit-action="classify" data-class="internal_transfer" data-category="Inter-account Transfers" data-subcategory="" data-transaction="${row.id}">Not OUT</button>
+          <button data-audit-action="classify" data-class="wealth_allocation" data-category="Investments" data-subcategory="" data-transaction="${row.id}">Invest</button>
+          <button data-audit-action="classify" data-class="reimbursement_pass_through" data-category="Reimbursements" data-subcategory="Company Expense" data-transaction="${row.id}">Reimb.</button>
         </div>
       </article>
     `)
     .join("");
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function handleAuditAction(button) {
   const action = button.dataset.auditAction;
   const txId = button.dataset.transaction;
   const body = action === "classify" ? {
-    economic_class: "household_spend",
+    economic_class: button.dataset.class || "household_spend",
     category: button.dataset.category,
     subcategory: button.dataset.subcategory || "",
   } : {};
@@ -290,6 +324,7 @@ async function handleAuditAction(button) {
     body: JSON.stringify(body),
   });
   await refreshAll();
+  if (state.auditMonth) await renderMonthAudit(state.auditMonth);
 }
 
 function renderTrustList(health) {
