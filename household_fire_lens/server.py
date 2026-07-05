@@ -168,6 +168,9 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         elif path == "/api/dashboard/spending":
             period = (query.get("period") or ["last13"])[0]
             self.send_json(spending_breakdown(self.conn, period))
+        elif path == "/api/dashboard/buckets":
+            period = (query.get("period") or ["last13"])[0]
+            self.send_json(self.bucket_totals(period))
         elif path == "/api/month-audit":
             month = (query.get("month") or [""])[0]
             self.send_json({"month": month, "rows": self.month_audit(month)})
@@ -466,7 +469,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 nt.id, nt.transaction_date, nt.amount, nt.currency, nt.normalized_merchant,
                 nt.counterparty_name, nt.description,
                 a.display_name AS account_name,
-                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.explanation,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.review_status, ta.explanation,
                 COALESCE(SUM(CASE WHEN tl.link_type = 'expense_reimbursement' THEN tl.amount ELSE 0 END), 0) AS linked_reimbursement,
                 GROUP_CONCAT(CASE WHEN tl.link_type = 'expense_reimbursement' THEN tl.from_transaction_id END) AS linked_inflows
             FROM normalized_transactions nt
@@ -478,7 +481,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
               AND nt.amount < 0
               AND ta.economic_class IN ('household_spend', 'debt_service')
             GROUP BY nt.id
-            ORDER BY ABS(nt.amount) DESC, nt.transaction_date, nt.id
+            ORDER BY ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date, nt.id
             """,
             (month,),
         )
@@ -486,7 +489,10 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             gross = abs(float(row["amount"] or 0))
             linked = float(row["linked_reimbursement"] or 0)
             row["net_outflow"] = max(0.0, gross - linked)
-            row["link_state"] = "linked" if linked else "open"
+            if float(row["confidence"] or 0) >= 0.995 and row["review_status"] == "reviewed":
+                row["link_state"] = "done"
+            else:
+                row["link_state"] = "linked" if linked else "open"
         return rows
 
     def handle_transaction_action(self, tx_id: int, action: str) -> None:
@@ -510,21 +516,128 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
                 economic_class = body.get("economic_class", "household_spend")
                 category = body.get("category", "Other")
                 subcategory = body.get("subcategory", "")
-            create_rule_from_review(self.conn, tx_id, economic_class, category, subcategory)
+            scope = body.get("scope", "transaction")
+            rule_id = create_rule_from_review(
+                self.conn,
+                tx_id,
+                economic_class,
+                category,
+                subcategory,
+                merchant_scope=scope == "merchant",
+            )
+            updated = self.apply_fast_annotation(tx_id, economic_class, category, subcategory, rule_id, scope)
+            self.conn.commit()
+            recompute_monthly_snapshots(self.conn)
+            self.send_json({"ok": True, "updated": updated})
+            return
+        self.conn.commit()
+        recompute_monthly_snapshots(self.conn)
+        self.send_json({"ok": True})
+
+    def apply_fast_annotation(
+        self,
+        tx_id: int,
+        economic_class: str,
+        category: str,
+        subcategory: str,
+        rule_id: int,
+        scope: str,
+    ) -> int:
+        tx = self.conn.execute(
+            """
+            SELECT normalized_merchant, direction
+            FROM normalized_transactions
+            WHERE id = ?
+            """,
+            (tx_id,),
+        ).fetchone()
+        if not tx:
+            raise ValueError("Transaction not found")
+        if scope == "merchant" and tx["normalized_merchant"]:
+            rows = self.conn.execute(
+                """
+                SELECT id
+                FROM normalized_transactions
+                WHERE is_duplicate = 0
+                  AND normalized_merchant = ?
+                  AND direction = ?
+                """,
+                (tx["normalized_merchant"], tx["direction"]),
+            ).fetchall()
+            tx_ids = [int(row["id"]) for row in rows]
+        else:
+            tx_ids = [tx_id]
+        for target_id in tx_ids:
             self.conn.execute(
                 """
                 INSERT OR REPLACE INTO transaction_annotations (
                     transaction_id, economic_class, category, subcategory, confidence, rule_id,
                     review_status, digest_tier, explanation, updated_at
-                ) VALUES (?, ?, ?, ?, 0.99, NULL, 'reviewed', 'reviewed', 'Month audit decision', CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, 1.0, ?, 'reviewed', 'reviewed', 'User month-audit decision', CURRENT_TIMESTAMP)
                 """,
-                (tx_id, economic_class, category, subcategory),
+                (target_id, economic_class, category, subcategory, rule_id),
             )
-        self.conn.commit()
-        if reclassify_after:
-            classify_all(self.conn)
-        recompute_monthly_snapshots(self.conn)
-        self.send_json({"ok": True})
+        return len(tx_ids)
+
+    def bucket_totals(self, period: str) -> Dict[str, Any]:
+        from .aggregation import period_bounds_from_snapshots
+
+        start_month, end_month = period_bounds_from_snapshots(self.conn, period)
+        month_rows = fetch_all(
+            self.conn,
+            """
+            SELECT
+                substr(nt.transaction_date, 1, 7) AS month,
+                COALESCE(ta.category, 'Uncategorized') AS category,
+                COALESCE(ta.subcategory, '') AS subcategory,
+                SUM(ABS(nt.amount) - COALESCE(reimb.linked_amount, 0)) AS outflow,
+                COUNT(*) AS count,
+                AVG(ta.confidence) AS avg_confidence
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            LEFT JOIN (
+                SELECT to_transaction_id, SUM(amount) AS linked_amount
+                FROM transaction_links
+                WHERE link_type = 'expense_reimbursement'
+                GROUP BY to_transaction_id
+            ) reimb ON reimb.to_transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND nt.amount < 0
+              AND ta.economic_class IN ('household_spend', 'debt_service')
+              AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
+            GROUP BY month, category, subcategory
+            ORDER BY month, category, subcategory
+            """,
+            (start_month, end_month),
+        )
+        year_rows = fetch_all(
+            self.conn,
+            """
+            SELECT
+                substr(nt.transaction_date, 1, 4) AS year,
+                COALESCE(ta.category, 'Uncategorized') AS category,
+                COALESCE(ta.subcategory, '') AS subcategory,
+                SUM(ABS(nt.amount) - COALESCE(reimb.linked_amount, 0)) AS outflow,
+                COUNT(*) AS count,
+                AVG(ta.confidence) AS avg_confidence
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            LEFT JOIN (
+                SELECT to_transaction_id, SUM(amount) AS linked_amount
+                FROM transaction_links
+                WHERE link_type = 'expense_reimbursement'
+                GROUP BY to_transaction_id
+            ) reimb ON reimb.to_transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND nt.amount < 0
+              AND ta.economic_class IN ('household_spend', 'debt_service')
+              AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
+            GROUP BY year, category, subcategory
+            ORDER BY year, outflow DESC
+            """,
+            (start_month, end_month),
+        )
+        return {"months": month_rows, "years": year_rows}
 
     def link_transaction_to_best_inflow(self, tx_id: int) -> bool:
         outflow = self.conn.execute(

@@ -22,7 +22,7 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null };
+const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditBusy: false };
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -245,6 +245,10 @@ function renderYearlyTable(years) {
 async function renderMonthAudit(month) {
   const panel = document.getElementById("month-audit-panel");
   const list = document.getElementById("month-audit-list");
+  if (state.auditBusy) {
+    setAuditStatus("Still saving the last change. One moment...", "info");
+    return;
+  }
   state.auditMonth = month;
   document.getElementById("month-audit-title").textContent = `${month} OUT Drilldown`;
   panel.classList.remove("hidden");
@@ -299,6 +303,7 @@ async function renderMonthAudit(month) {
           <p class="audit-why">${escapeHtml(row.explanation || "")}</p>
         </div>
         <div class="audit-actions">
+          <span class="audit-state ${row.link_state}">${row.link_state === "done" ? "Done" : fmtPercent(row.confidence)}</span>
           <button data-audit-action="link-inflow" data-transaction="${row.id}">Link inflow</button>
           <button data-audit-action="tag-business" data-transaction="${row.id}">Business</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Groceries" data-subcategory="" data-transaction="${row.id}">Groceries</button>
@@ -314,6 +319,7 @@ async function renderMonthAudit(month) {
           <button data-audit-action="classify" data-class="internal_transfer" data-category="Inter-account Transfers" data-subcategory="" data-transaction="${row.id}">Not OUT</button>
           <button data-audit-action="classify" data-class="wealth_allocation" data-category="Investments" data-subcategory="" data-transaction="${row.id}">Invest</button>
           <button data-audit-action="classify" data-class="reimbursement_pass_through" data-category="Reimbursements" data-subcategory="Company Expense" data-transaction="${row.id}">Reimb.</button>
+          <button data-audit-action="custom-bucket" data-transaction="${row.id}" data-merchant="${escapeHtml(row.normalized_merchant || row.counterparty_name || "this merchant")}">Custom</button>
         </div>
       </article>
     `)
@@ -330,14 +336,40 @@ function setAuditStatus(message, tone = "info") {
 }
 
 async function handleAuditAction(button) {
-  const action = button.dataset.auditAction;
+  if (state.auditBusy) {
+    setAuditStatus("Still saving the last change. One moment...", "info");
+    return;
+  }
+  let action = button.dataset.auditAction;
   const txId = button.dataset.transaction;
-  const body = action === "classify" ? {
-    economic_class: button.dataset.class || "household_spend",
-    category: button.dataset.category,
-    subcategory: button.dataset.subcategory || "",
-  } : {};
+  const body = {};
+  if (action === "custom-bucket") {
+    const category = window.prompt("New bucket name", "");
+    if (!category || !category.trim()) {
+      setAuditStatus("Custom bucket cancelled.");
+      return;
+    }
+    const subcategory = window.prompt("Optional sub-bucket", "") || "";
+    const scope = window.confirm(`Apply '${category.trim()}' to all transactions from ${button.dataset.merchant}?`)
+      ? "merchant"
+      : "transaction";
+    action = "classify";
+    Object.assign(body, {
+      economic_class: "household_spend",
+      category: category.trim(),
+      subcategory: subcategory.trim(),
+      scope,
+    });
+  } else if (action === "classify") {
+    Object.assign(body, {
+      economic_class: button.dataset.class || "household_spend",
+      category: button.dataset.category,
+      subcategory: button.dataset.subcategory || "",
+      scope: button.dataset.scope || "transaction",
+    });
+  }
   const originalText = button.textContent;
+  state.auditBusy = true;
   button.disabled = true;
   button.textContent = "Saving...";
   setAuditStatus(`Saving ${originalText} for transaction ${txId}...`);
@@ -347,14 +379,19 @@ async function handleAuditAction(button) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    setAuditStatus("Saved. Recalculating dashboard...");
-    await refreshAll();
+    setAuditStatus("Saved. Recalculating this month...");
+    await loadFire();
+    if (document.getElementById("spending").classList.contains("active")) {
+      await loadSpending();
+    }
+    state.auditBusy = false;
     if (state.auditMonth) await renderMonthAudit(state.auditMonth);
     setAuditStatus("Saved and recalculated.", "success");
   } catch (error) {
     button.disabled = false;
     button.textContent = originalText;
     setAuditStatus(error.message, "error");
+    state.auditBusy = false;
   }
 }
 
@@ -513,7 +550,14 @@ async function loadSpending() {
   );
   renderCategoryMonths(data.category_months || []);
   populateCategoryFilter(data.breakdown || []);
+  await loadBuckets();
   await loadTransactions();
+}
+
+async function loadBuckets() {
+  const data = await api(`/api/dashboard/buckets?period=${periodQuery()}`);
+  renderBucketYearTotals(data.years || []);
+  renderBucketMonthTotals(data.months || []);
 }
 
 function populateCategoryFilter(rows) {
@@ -553,6 +597,50 @@ function renderCategoryMonths(rows) {
           </div>
         `,
       )
+      .join("")}
+  `;
+}
+
+function bucketLabel(row) {
+  return `${row.category || "Uncategorized"}${row.subcategory ? ` / ${row.subcategory}` : ""}`;
+}
+
+function renderBucketYearTotals(rows) {
+  renderTable(
+    "bucket-years-table",
+    [
+      { key: "year", label: "Year" },
+      { key: "bucket", label: "Bucket", render: bucketLabel },
+      { key: "outflow", label: "Out", number: true, render: (row) => fmtPrecise(row.outflow) },
+      { key: "count", label: "Rows", number: true },
+      { key: "avg_confidence", label: "Conf.", number: true, render: (row) => fmtPercent(row.avg_confidence) },
+    ],
+    rows,
+  );
+}
+
+function renderBucketMonthTotals(rows) {
+  const target = document.getElementById("bucket-months");
+  if (!rows.length) {
+    target.innerHTML = `<p class="empty">No bucket totals yet.</p>`;
+    return;
+  }
+  const months = [...new Set(rows.map((row) => row.month))].sort();
+  const buckets = [...new Set(rows.map(bucketLabel))].sort();
+  const lookup = new Map(rows.map((row) => [`${bucketLabel(row)}|${row.month}`, Number(row.outflow || 0)]));
+  target.innerHTML = `
+    <div class="matrix-row bucket-header" style="--month-count:${months.length}"><span>Bucket</span>${months.map((month) => `<span>${escapeHtml(month)}</span>`).join("")}<span>Total</span></div>
+    ${buckets
+      .map((bucket) => {
+        const total = months.reduce((sum, month) => sum + (lookup.get(`${bucket}|${month}`) || 0), 0);
+        return `
+          <div class="matrix-row bucket-row" style="--month-count:${months.length}">
+            <strong>${escapeHtml(bucket)}</strong>
+            ${months.map((month) => `<span>${lookup.get(`${bucket}|${month}`) ? fmtMoney(lookup.get(`${bucket}|${month}`)) : ""}</span>`).join("")}
+            <strong>${fmtMoney(total)}</strong>
+          </div>
+        `;
+      })
       .join("")}
   `;
 }

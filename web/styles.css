@@ -575,11 +575,21 @@ th.number {
   border-radius: 8px;
 }
 
+.wide-matrix {
+  max-height: 620px;
+}
+
 .matrix-row {
   min-width: 760px;
   display: grid;
   grid-template-columns: minmax(180px, 1.2fr) repeat(8, minmax(90px, 1fr));
   border-bottom: 1px solid var(--line);
+}
+
+.matrix-row.bucket-header,
+.matrix-row.bucket-row {
+  grid-template-columns: minmax(220px, 1.4fr) repeat(var(--month-count, 12), minmax(92px, 1fr)) minmax(100px, 1fr);
+  min-width: max(960px, calc(320px + (var(--month-count, 12) * 96px)));
 }
 
 .matrix-row > * {
@@ -816,6 +826,11 @@ pre {
   border-color: rgba(56, 211, 159, 0.45);
 }
 
+.audit-row.done {
+  border-color: rgba(64, 211, 125, 0.62);
+  background: rgba(64, 211, 125, 0.08);
+}
+
 .audit-row strong,
 .audit-row span,
 .audit-row small,
@@ -843,6 +858,23 @@ pre {
   grid-template-columns: repeat(2, minmax(96px, 1fr));
   gap: 8px;
   align-content: start;
+}
+
+.audit-state {
+  grid-column: 1 / -1;
+  justify-self: end;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.audit-state.done {
+  border-color: rgba(64, 211, 125, 0.58);
+  color: var(--good);
 }
 
 @media (max-width: 900px) {
