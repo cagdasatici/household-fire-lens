@@ -313,7 +313,9 @@ async function renderMonthAudit(month) {
           <button data-audit-action="classify" data-category="Education" data-subcategory="Professional Education" data-transaction="${row.id}">Education</button>
           <button data-audit-action="classify" data-category="Holiday" data-subcategory="" data-transaction="${row.id}">Holiday</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Transportation" data-subcategory="" data-transaction="${row.id}">Transport</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Subscriptions" data-subcategory="" data-transaction="${row.id}">Subscriptions</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Health" data-subcategory="" data-transaction="${row.id}">Health</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Housing" data-subcategory="" data-transaction="${row.id}">Housing</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Pet Care" data-subcategory="" data-transaction="${row.id}">Pet care</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Home and Furniture" data-subcategory="" data-transaction="${row.id}">Home</button>
           <button data-audit-action="classify" data-category="Shopping" data-subcategory="" data-transaction="${row.id}">Shopping</button>
