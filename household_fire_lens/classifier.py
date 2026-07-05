@@ -27,18 +27,18 @@ ECONOMIC_CLASSES = {
 
 MERCHANT_CATEGORY_RULES: List[Tuple[Tuple[str, ...], str, str]] = [
     (("ALBERT HEIJN", "AH TO GO", "JUMBO", "LIDL", "ALDI", "PLUS SUPERMARKT", "DIRK", "VOMAR", "DEKAMARKT", "HOOGVLIET", "NATUURLIJKBESTELD", "HAARLEM TEA"), "Groceries", ""),
-    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA", "TROUBADOUR", "SUSHI"), "Eating Out", ""),
-    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE", "TURKISH AIRLINES", "LANDAL", "PEGASUS", "AJET HAVA"), "Holiday", ""),
-    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE", "AUTO BEDRIJF", "AUTOBEDR", "FIETSVOORDEEL", "YELLOWBRICK"), "Transportation", ""),
+    (("RESTAURANT", "CAFE", "BAR ", "UBER EATS", "DELIVEROO", "THUISBEZORGD", "MCDONALD", "BURGER", "PIZZA", "TROUBADOUR", "SUSHI", "STARBUCKS", "HMSHOST", "KOFFIE", "SNACKBAR", "CAFETARIA", "EETCAFE", "BAKKERIJ", "COFFEE", "KFC", "SUBWAY", "LA PLACE", "VAPIANO", "GRILL"), "Eating Out", ""),
+    (("AIRBNB", "HOTEL", "HOSTEL", "KLM", "TRANSAVIA", "RYANAIR", "EASYJET", "EXPEDIA", "TUI", "SUNWEB", "BOOKING.COM", "BOOKING COM", "VRBO", "FLIGHT", "AIRLINE", "TURKISH AIRLINES", "LANDAL", "PEGASUS", "AJET HAVA", "HOF VAN SAKSEN", "NOOITGEDACHT", "CENTER PARCS", "ROOMPOT", "RESORT"), "Holiday", ""),
+    (("NS ", "NS-", "OV-CHIP", "OVPAY", "SHELL", "BP ", "ESSO", "PARKING", "Q-PARK", "UBER", "BOLT", "AUTOMOTIVE", "KWIKFIT", "OPONEO", "GARAGE", "AUTO BEDRIJF", "AUTOBEDR", "FIETSVOORDEEL", "YELLOWBRICK", "SMOOV", "ALLEGO", "FASTNED", "TINQ", "TANGO", "SHELL RECHARGE", "GVB", "RET ", "ARRIVA", "CONNEXXION", "FLIXBUS", "GREENWHEELS"), "Transportation", ""),
     (("SPOTIFY", "NETFLIX", "APPLE.COM/BILL", "GOOGLE", "ICLOUD", "PATREON", "SUBSCRIPTION", "OPENAI", "CHATGPT", "DPG MEDIA"), "Subscriptions", ""),
     (("ENERGIE", "VATTENFALL", "ENECO", "WATER", "INTERNET", "ZIGGO", "KPN", "ODIDO", "ETECK", "POWERPEERS", "VANDEBRON", "FRANK ENERGIE"), "Housing", "Utilities"),
     (("INSURANCE", "VERZEKERING", "ALLIANZ", "AON", "ASR", "NN ", "NATIONALE NED", "TAF BV", "RISK VERZEKERINGEN"), "Housing", "Insurance"),
     (("MEUBEL", "HENDERS EN HAZEL", "DE RUIJTER MEUBEL", "KEUKENLOODS", "PRAXIS", "GAMMA", "KARWEI", "FURNITURE", "HOME IMPROVEMENT", "RUITER DAKKAPELLEN", "SOLAR TOTAAL", "STUKADOOR", "VUGTS ZONWERING", "MOOI MAKELAARDIJ"), "Home and Furniture", "Home Improvement"),
     (("HAPPY VALLEY", "DIERENPENSION", "DIERENARTS", "DIERENARTSPRAKTIJK", "VETERINARY", "VET ", " HOND ", "HOND TOBY"), "Pet Care", ""),
-    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER", "SPORTCITY", "HEALTH CLUB", "AMSTELHOF SPORT"), "Health", ""),
-    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION", "UNIQLO", "LIMANGO", "WEHKAMP", "WE FASHION", "BAMBULAB", "ARTENCRAFT", "BEEKMAN B.V.", "ONE2TRACK"), "Shopping", ""),
+    (("APOTHEEK", "PHARMACY", "HOSPITAL", "ZORG", "DENTIST", "TANDARTS", "EYE WISH", "OPTICIAN", "KRUIDVAT", "ETOS", "TREKPLEISTER", "SPORTCITY", "HEALTH CLUB", "HEALTH RACQUET", "RACQUET", "PADEL", "TENNIS", "FITNESS", "BASIC-FIT", "BASIC FIT", "TRAINMORE", "AMSTELHOF SPORT", "FYSIO", "HUISARTS"), "Health", ""),
+    (("AMAZON", "BOL.COM", "IKEA", "H&M", "H & M", "HEMA", "C&A", "ZARA", "COOLBLUE", "MEDIA MARKT", "DECATHLON", "THEPHONELAB", "ACTION", "UNIQLO", "LIMANGO", "WEHKAMP", "WE FASHION", "BAMBULAB", "BAMBU LAB", "ARTENCRAFT", "BEEKMAN B.V.", "ONE2TRACK", "APPLE STORE", "BAX SHOP", "BAX-SHOP", "PRIMARK", "ZALANDO", "MEDIAMARKT"), "Shopping", ""),
     (("BELASTING", "TAX", "GEMEENTE", "WATERNSCHAP", "WATERSCHAP", "PUBLIEKSZAKEN"), "Taxes and Government", ""),
-    (("KINDERRIJK", "CODERMINDS", "MW IS SMITS", "BCML ENTERPRISE", "I TURN", "SQUALA", "SQULA", "DANCE WAREHOUSE", "ACTIVITEITENCOMMISSIE OBS TWICKEL", "DOZZI VIA TIKKIE"), "Education", "Kids Activities"),
+    (("KINDERRIJK", "CODERMINDS", "MW IS SMITS", "BCML ENTERPRISE", "I TURN", "SQUALA", "SQULA", "DANCE WAREHOUSE", "ACTIVITEITENCOMMISSIE OBS TWICKEL", "OBS TWICKEL", "BASISSCHOOL", "SCOUTING", "MONKEY MOVES", "KINDEROPVANG", "ZWEMLES", "ZWEMBAD", "GYMNASTIEK", "MUZIEKSCHOOL", "DOZZI VIA TIKKIE"), "Education", "Kids Activities"),
     (("EMERITUS", "MIT XPRO", "CAMBRIDGE"), "Education", "Professional Education"),
 ]
 
@@ -438,7 +438,7 @@ def classify_transaction(
     if amount > 0 and "DEPOTBETALING" in text:
         return Annotation("refund", "Home and Furniture", "Home Improvement", 0.82, "Mortgage/home-improvement depot payment")
 
-    if any(keyword in text for keyword in ("TRANSFERWISE", "WISE EUROPE", "WISE PAYMENTS")):
+    if any(keyword in text for keyword in ("TRANSFERWISE", "WISE EUROPE", "WISE PAYMENTS")) or "WISE" in merchant_text.split():
         return Annotation("internal_transfer", "Inter-account Transfers", "Wise", 0.84, "Wise/TransferWise own-account bridge")
 
     if amount > 0 and any(keyword in text for keyword in SOCIAL_INSURANCE_KEYWORDS):
@@ -475,7 +475,7 @@ def classify_transaction(
         return Annotation("debt_service", "Housing", "Mortgage", 0.92, "Mortgage keyword")
 
     if amount < 0 and any(keyword in text for keyword in BANK_FEE_KEYWORDS):
-        return Annotation("household_spend", "Banking and Fees", "", 0.84, "Precise bank package or card fee keyword")
+        return Annotation("household_spend", "Subscriptions", "Account Fees", 0.84, "Recurring bank package or card fee")
 
     if amount > 0 and "CREDITRENTE" in text:
         return Annotation("income", "Interest", "", 0.8, "Credit interest received")

@@ -6,6 +6,7 @@ const titles = {
   optimization: ["Optimization", "Ranked levers, recurring spend, trends, and amortization decisions."],
   flow: ["Monthly Flow", "Month-by-month household economics."],
   spending: ["Spending", "Category, merchant, and transaction drilldown."],
+  buckets: ["Buckets", "Every spending bucket summed by month and year."],
   review: ["Review", "Material uncertainty that needs a decision."],
   health: ["Data Health", "Trust indicators for imported and classified data."],
   imports: ["Imports", "Upload files, set account roles, and inspect rules."],
@@ -381,12 +382,16 @@ async function handleAuditAction(button) {
     });
     setAuditStatus("Saved. Recalculating this month...");
     await loadFire();
+    await loadBuckets();
     if (document.getElementById("spending").classList.contains("active")) {
       await loadSpending();
     }
     state.auditBusy = false;
     if (state.auditMonth) await renderMonthAudit(state.auditMonth);
-    setAuditStatus("Saved and recalculated.", "success");
+    const savedMsg = body.category
+      ? `Saved. '${body.category}' now shows in the Buckets tab.`
+      : "Saved and recalculated.";
+    setAuditStatus(savedMsg, "success");
   } catch (error) {
     button.disabled = false;
     button.textContent = originalText;
@@ -958,7 +963,7 @@ async function refreshAll() {
   setText("side-db-status", "refreshing");
   await loadMetadata();
   await loadFire();
-  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadReview(), loadImports()]);
+  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadBuckets(), loadReview(), loadImports()]);
   setText("side-db-status", "ready");
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fire-lens",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "household_fire_lens", "--port", "8788"],
+      "port": 8788
+    }
+  ]
+}

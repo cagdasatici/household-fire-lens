@@ -20,6 +20,7 @@
         <button class="nav-item" data-view="optimization">Optimization</button>
         <button class="nav-item" data-view="flow">Monthly Flow</button>
         <button class="nav-item" data-view="spending">Spending</button>
+        <button class="nav-item" data-view="buckets">Buckets</button>
         <button class="nav-item" data-view="review">Review</button>
         <button class="nav-item" data-view="health">Data Health</button>
         <button class="nav-item" data-view="imports">Imports</button>
@@ -208,22 +209,6 @@
         </div>
         <div class="panel">
           <div class="panel-heading">
-            <h3>Bucket Month Overview</h3>
-            <span>Every bucket across the selected period</span>
-          </div>
-          <div id="bucket-months" class="matrix wide-matrix"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-heading">
-            <h3>Bucket Year Overview</h3>
-            <span>Yearly totals by bucket and sub-bucket</span>
-          </div>
-          <div class="table-wrap">
-            <table id="bucket-years-table"></table>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="panel-heading">
             <h3>Transactions</h3>
             <span>Trace dashboard numbers back to source rows.</span>
           </div>
@@ -254,6 +239,25 @@
           <div class="table-wrap">
             <table id="transactions-table"></table>
           </div>
+        </div>
+      </section>
+
+      <section id="buckets" class="view">
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Bucket Year Overview</h3>
+            <span>Yearly totals by bucket and sub-bucket</span>
+          </div>
+          <div class="table-wrap">
+            <table id="bucket-years-table"></table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h3>Bucket Month Overview</h3>
+            <span>Every bucket across the selected period</span>
+          </div>
+          <div id="bucket-months" class="matrix wide-matrix"></div>
         </div>
       </section>
 
