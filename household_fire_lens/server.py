@@ -25,6 +25,7 @@ from .aggregation import (
     recurring_merchants,
     spending_breakdown,
     spending_insights,
+    spending_story,
 )
 from .classifier import classify_all, create_rule_from_review, review_group_key
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
@@ -184,7 +185,8 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             recompute_monthly_snapshots(self.conn)
             self.send_json(optimization_insights(self.conn))
         elif path == "/api/dashboard/insights":
-            self.send_json(spending_insights(self.conn))
+            period = (query.get("period") or ["all"])[0]
+            self.send_json({**spending_insights(self.conn, period), "story": spending_story(self.conn)})
         elif path == "/api/recurring":
             self.send_json({"recurring": recurring_merchants(self.conn)})
         elif path == "/api/amortization-rules":

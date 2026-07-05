@@ -744,7 +744,7 @@ async function loadBuckets() {
 }
 
 async function loadInsights() {
-  const data = await api("/api/dashboard/insights");
+  const data = await api(`/api/dashboard/insights?period=${periodQuery()}`);
   renderInsights(data);
 }
 
@@ -755,7 +755,101 @@ function renderInsights(data) {
     return;
   }
 
-  let html = `
+  let html = "";
+
+  if (data.story) {
+    html += `
+    <div class="insights-panel story-panel">
+      <h4>${escapeHtml(data.story.headline || "Full-history story")}</h4>
+      <div class="story-summary">
+        ${(data.story.summary || [])
+          .map((line) => `<p>${escapeHtml(line)}</p>`)
+          .join("")}
+      </div>
+      <div class="story-events">
+        ${(data.story.events || [])
+          .map(
+            (event) => `
+            <article class="story-event">
+              <div class="story-event-head">
+                <strong>${escapeHtml(event.label || event.merchant || "Event")}</strong>
+                <span>${escapeHtml(event.date || event.month || "")}</span>
+              </div>
+              <div class="story-event-meta">
+                <span>${escapeHtml(event.merchant || "")}</span>
+                <span>${escapeHtml(event.category || "")}${event.subcategory ? ` · ${escapeHtml(event.subcategory)}` : ""}${event.reimbursable ? " · reimbursed" : ""}</span>
+                <span>${escapeHtml(event.amount || "")}</span>
+              </div>
+              <p>${escapeHtml(event.why || "")}</p>
+              ${
+                event.month_top_categories && event.month_top_categories.length
+                  ? `<ul class="story-mini-list">${event.month_top_categories
+                      .map(
+                        (item) =>
+                          `<li><strong>${escapeHtml(item.category || "")}</strong><span>${escapeHtml(item.outflow || "")}</span></li>`,
+                      )
+                      .join("")}</ul>`
+                  : ""
+              }
+            </article>
+          `,
+          )
+          .join("")}
+      </div>
+      <div class="story-jumps">
+        ${(data.story.jump_drivers || [])
+          .map(
+            (jump) => `
+            <div class="story-jump">
+              <strong>${escapeHtml(jump.prior_year || "")} → ${escapeHtml(jump.current_year || "")}</strong>
+              <span>Burn ${escapeHtml(jump.burn_delta || "")} · Income ${escapeHtml(jump.income_delta || "")}</span>
+              <p>${escapeHtml(jump.note || "")}</p>
+            </div>
+          `,
+          )
+          .join("")}
+      </div>
+      ${
+        data.story.other_breakdown && data.story.other_breakdown.length
+          ? `
+        <div class="story-others">
+          <h5>Other, top-down</h5>
+          <div class="table-wrap">
+            <table class="insights-table story-others-table">
+              <thead>
+                <tr>
+                  <th>Merchant</th>
+                  <th>Date</th>
+                  <th>Amount</th>
+                  <th>Bucket</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${data.story.other_breakdown
+                  .slice(0, 20)
+                  .map(
+                    (row) => `
+                      <tr>
+                        <td>${escapeHtml(row.merchant || "")}</td>
+                        <td>${escapeHtml(row.date || "")}</td>
+                        <td>${escapeHtml(row.amount || "")}</td>
+                        <td>${escapeHtml(row.subcategory || "")}</td>
+                        <td>${escapeHtml(row.confidence ?? "")}</td>
+                      </tr>
+                    `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>`
+          : ""
+      }
+    </div>`;
+  }
+
+  html += `
     <div class="insights-panel">
       <h4>Yearly Totals</h4>
       <div class="insights-totals">
@@ -802,7 +896,7 @@ function renderInsights(data) {
         html += `<ul>`;
         for (const item of takeaway.items) {
           if (item.category) {
-            html += `<li><strong>${escapeHtml(item.category)}</strong>: ${item.amount_2023 || "€0"} → ${item.amount_2024 || "€0"} <span class="change">${item.change}</span> (${item.delta})</li>`;
+            html += `<li><strong>${escapeHtml(item.category)}</strong>: ${item.prior_amount || "€0"} → ${item.current_amount || "€0"} <span class="change">${item.change}</span> (${item.delta})</li>`;
           }
         }
         html += `</ul>`;

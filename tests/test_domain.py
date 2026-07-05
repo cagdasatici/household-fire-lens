@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots
+from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots, spending_insights, spending_story
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
@@ -347,6 +347,60 @@ class DomainTests(unittest.TestCase):
         categories = {item["category"] for item in insights["opportunities"]}
         self.assertIn("Unknown Card Spend", categories)
         self.assertGreaterEqual(insights["summary"]["months_loaded"], 3)
+
+    def test_spending_insights_cover_all_adjacent_year_pairs(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2023-05-01,Main,Hotel booking,Booking.com,-300.00,EUR
+2024-05-01,Main,Hotel booking,Booking.com,-800.00,EUR
+2025-05-01,Main,Hotel booking,Booking.com,-1200.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-spending-insights.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        insights = spending_insights(self.conn)
+        titles = [item["title"] for item in insights["key_takeaways"]]
+        self.assertIn("Year-over-year category shifts (2023 → 2024)", titles)
+        self.assertIn("Year-over-year category shifts (2024 → 2025)", titles)
+        latest = next(item for item in insights["key_takeaways"] if item["title"].endswith("(2024 → 2025)"))
+        self.assertEqual(latest["items"][0]["category"], "Holiday")
+        self.assertEqual(latest["items"][0]["prior_year"], "2024")
+        self.assertEqual(latest["items"][0]["current_year"], "2025")
+
+    def test_spending_story_surfaces_major_lumpy_events(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2022-09-02,Main,"Auto Bedrijf Centrum Online Banking Name: Auto Bedrijf Centrum Description: Koopovereenkomst 202206649 Kenteken P852DL",Auto Bedrijf Centrum,-30383.45,EUR
+2023-12-15,Main,"Comfort Partners B.V. Online Banking Name: Comfort Partners B.V. Description: Heat pump installation",Comfort Partners B.V.,-14972.20,EUR
+2025-11-21,Main,"EMERITUS* MIT XPRO CAMBRIDGE Foreign Spend Amount: 7,750.00 Amerikaanse dollar",EMERITUS MIT XPRO CAMBRIDGE,-6904.01,EUR
+2024-07-04,Main,"KLARNA BANK AB via Stichting Mollie Payments iDEAL",KLARNA BANK AB,-2345.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-story-events.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        story = spending_story(self.conn)
+        labels = [item["label"] for item in story["events"]]
+        self.assertIn("BMW X1 purchase", labels)
+        self.assertIn("Heat pump installation", labels)
+        self.assertIn("Professional education (reimbursable)", labels)
+        bmw = next(item for item in story["events"] if item["label"] == "BMW X1 purchase")
+        self.assertEqual(bmw["month"], "2022-09")
+        heatpump = next(item for item in story["events"] if item["label"] == "Heat pump installation")
+        self.assertEqual(heatpump["month"], "2023-12")
+        emeritus = next(item for item in story["events"] if item["label"] == "Professional education (reimbursable)")
+        self.assertTrue(emeritus["reimbursable"])
+        self.assertEqual(emeritus["month"], "2025-11")
+        self.assertEqual(emeritus["category"], "Education")
+        self.assertGreater(len(story["other_breakdown"]), 0)
+        self.assertGreaterEqual(story["other_breakdown"][0]["amount"], story["other_breakdown"][-1]["amount"])
 
     def test_holiday_and_other_buckets_are_available(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

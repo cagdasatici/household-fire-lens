@@ -648,8 +648,9 @@ def category_trends(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return alerts
 
 
-def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
+def spending_insights(conn: sqlite3.Connection, period: str = "all") -> Dict[str, Any]:
     """Year-over-year spending analysis with key takeaways."""
+    start_month, end_month = period_bounds_from_snapshots(conn, period)
     rows = conn.execute(
         """
         SELECT
@@ -660,10 +661,11 @@ def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
           AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
         GROUP BY year, category
         ORDER BY year, category
         """
-    ).fetchall()
+    , (start_month, end_month)).fetchall()
     from datetime import datetime, timedelta
     today = datetime.now()
     current_year = today.strftime("%Y")
@@ -697,32 +699,239 @@ def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
             cat_data["years"][year] = money(amount)
         comparison["categories"].append(cat_data)
 
-    if "2024" in by_year_category and "2023" in by_year_category:
+    years = sorted(by_year_category.keys())
+    for prior_year, current_year_key in zip(years, years[1:]):
         changes = []
         for category in all_categories:
-            amount_2023 = by_year_category["2023"].get(category, 0.0)
-            amount_2024 = by_year_category["2024"].get(category, 0.0)
-            if amount_2023 > 100:
-                change_pct = ((amount_2024 - amount_2023) / amount_2023) * 100 if amount_2023 else 0
-                if abs(change_pct) > 15:
-                    delta = amount_2024 - amount_2023
-                    changes.append({
-                        "category": category,
-                        "amount_2023": money(amount_2023),
-                        "amount_2024": money(amount_2024),
-                        "change": f"{change_pct:+.1f}%",
-                        "delta": money(delta),
-                        "_delta_numeric": delta,
-                    })
+            prior_amount = by_year_category[prior_year].get(category, 0.0)
+            current_amount = by_year_category[current_year_key].get(category, 0.0)
+            if prior_amount <= 100:
+                continue
+            change_pct = ((current_amount - prior_amount) / prior_amount) * 100 if prior_amount else 0
+            if abs(change_pct) <= 15:
+                continue
+            delta = current_amount - prior_amount
+            changes.append(
+                {
+                    "category": category,
+                    "prior_year": prior_year,
+                    "current_year": current_year_key,
+                    "prior_amount": money(prior_amount),
+                    "current_amount": money(current_amount),
+                    "change": f"{change_pct:+.1f}%",
+                    "delta": money(delta),
+                    "_delta_numeric": delta,
+                }
+            )
         changes.sort(key=lambda x: abs(x["_delta_numeric"]), reverse=True)
         for change in changes:
             del change["_delta_numeric"]
-        comparison["key_takeaways"].append({
-            "title": "Year-over-year category shifts (2023 → 2024)",
-            "items": changes[:5],
-        })
+        if changes:
+            comparison["key_takeaways"].append(
+                {
+                    "title": f"Year-over-year category shifts ({prior_year} → {current_year_key})",
+                    "items": changes[:5],
+                }
+            )
 
     return comparison
+
+
+def spending_story(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Return a full-history narrative for the dashboard's story panel."""
+    year_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+                substr(nt.transaction_date, 1, 4) AS year,
+                SUM(CASE WHEN ta.economic_class IN ('household_spend', 'debt_service') AND nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS household_spend_cashflow,
+                SUM(CASE WHEN ta.economic_class = 'income' AND nt.amount > 0 THEN nt.amount ELSE 0 END) AS real_income
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+            GROUP BY year
+            ORDER BY year
+            """
+        ).fetchall()
+    ]
+    if not year_rows:
+        return {"headline": "No story yet.", "summary": [], "events": [], "jump_drivers": []}
+
+    yearly_lookup = {row["year"]: row for row in year_rows}
+    first_year = year_rows[0]["year"]
+    last_year = year_rows[-1]["year"]
+
+    events: List[Dict[str, Any]] = []
+    event_specs = [
+        {
+            "label": "BMW X1 purchase",
+            "merchant": "AUTO BEDRIJF CENTRUM",
+            "match_sql": """
+                SELECT
+                    nt.transaction_date,
+                    nt.amount,
+                    nt.description,
+                    nt.normalized_merchant,
+                    COALESCE(ta.category, 'Uncategorized') AS category,
+                    COALESCE(ta.subcategory, '') AS subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                WHERE nt.is_duplicate = 0
+                  AND (
+                      upper(nt.normalized_merchant) LIKE '%AUTO BEDRIJF CENTRUM%'
+                      OR nt.description LIKE '%P852DL%'
+                  )
+                ORDER BY ABS(nt.amount) DESC
+                LIMIT 1
+            """,
+            "why": "The 2022 spend spike is a deliberate asset purchase, not day-to-day burn.",
+        },
+        {
+            "label": "Heat pump installation",
+            "merchant": "COMFORT PARTNERS B.V.",
+            "match_sql": """
+                SELECT
+                    nt.transaction_date,
+                    nt.amount,
+                    nt.description,
+                    nt.normalized_merchant,
+                    COALESCE(ta.category, 'Uncategorized') AS category,
+                    COALESCE(ta.subcategory, '') AS subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                WHERE nt.is_duplicate = 0
+                  AND upper(nt.normalized_merchant) LIKE '%COMFORT PARTNERS%'
+                ORDER BY ABS(nt.amount) DESC
+                LIMIT 1
+            """,
+            "why": "The late-2023 jump is a home-improvement project, again a lumpy asset-style outflow.",
+        },
+        {
+            "label": "Professional education (reimbursable)",
+            "merchant": "EMERITUS MIT XPRO CAMBRIDGE",
+            "match_sql": """
+                SELECT
+                    nt.transaction_date,
+                    nt.amount,
+                    nt.description,
+                    nt.normalized_merchant,
+                    COALESCE(ta.category, 'Uncategorized') AS category,
+                    COALESCE(ta.subcategory, '') AS subcategory
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                WHERE nt.is_duplicate = 0
+                  AND upper(nt.normalized_merchant) LIKE '%EMERITUS MIT XPRO CAMBRIDGE%'
+                ORDER BY ABS(nt.amount) DESC
+                LIMIT 1
+            """,
+            "why": "This is a reimbursed professional-education event from Booking: it belongs on the dashboard, but it should be read as employer-backed development rather than ordinary household burn.",
+            "reimbursable": True,
+        },
+    ]
+
+    for spec in event_specs:
+        row = conn.execute(spec["match_sql"]).fetchone()
+        if not row:
+            continue
+        month = str(row["transaction_date"])[:7]
+        month_rows = conn.execute(
+            """
+            SELECT
+                COALESCE(ta.category, 'Uncategorized') AS category,
+                SUM(CASE WHEN nt.amount < 0 THEN ABS(nt.amount) ELSE 0 END) AS outflow
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND substr(nt.transaction_date, 1, 7) = ?
+            GROUP BY category
+            ORDER BY outflow DESC
+            LIMIT 3
+            """,
+            (month,),
+        ).fetchall()
+        events.append(
+            {
+                "date": row["transaction_date"],
+                "month": month,
+                "label": spec["label"],
+                "merchant": row["normalized_merchant"] or spec["merchant"],
+                "amount": money(abs(float(row["amount"]))),
+                "category": row["category"],
+                "subcategory": row["subcategory"],
+                "description": row["description"],
+                "why": spec["why"],
+                "reimbursable": bool(spec.get("reimbursable", False)),
+                "month_top_categories": [
+                    {"category": category_row["category"], "outflow": money(category_row["outflow"])}
+                    for category_row in month_rows
+                ],
+            }
+        )
+
+    other_rows = conn.execute(
+        """
+        SELECT
+            nt.transaction_date,
+            nt.amount,
+            nt.normalized_merchant,
+            nt.description,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            COALESCE(ta.subcategory, '') AS subcategory,
+            ta.confidence
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND ta.category = 'Other'
+        ORDER BY ABS(nt.amount) DESC, nt.transaction_date DESC
+        """
+    ).fetchall()
+    other_breakdown = [
+        {
+            "date": row["transaction_date"],
+            "month": str(row["transaction_date"])[:7],
+            "merchant": row["normalized_merchant"] or "Unknown merchant",
+            "amount": money(abs(float(row["amount"]))),
+            "subcategory": row["subcategory"],
+            "confidence": money(float(row["confidence"] or 0)),
+            "description": row["description"],
+        }
+        for row in other_rows
+    ]
+
+    jump_drivers: List[Dict[str, Any]] = []
+    years = [row["year"] for row in year_rows]
+    for prior_year, current_year in zip(years, years[1:]):
+        prior = yearly_lookup[prior_year]
+        current = yearly_lookup[current_year]
+        burn_delta = float(current["household_spend_cashflow"]) - float(prior["household_spend_cashflow"])
+        income_delta = float(current["real_income"]) - float(prior["real_income"])
+        jump_drivers.append(
+            {
+                "prior_year": prior_year,
+                "current_year": current_year,
+                "burn_delta": money(burn_delta),
+                "income_delta": money(income_delta),
+                "note": (
+                    "Income outran burn" if income_delta > burn_delta else "Spending outpaced income"
+                ),
+            }
+        )
+
+    summary = [
+        f"The record runs from {first_year} to {last_year}, and the long trend is stronger income growth than spending growth.",
+        "The visible jumps are mostly lumpy decisions: a car purchase, a heat pump, and recurring transfers/investments that make cashflow look noisier than household burn.",
+        "Day-to-day categories still matter, but the biggest year-to-year moves come from housing, transportation, education, holiday, and internal wealth movement.",
+        "The low-confidence pile is concentrated in Other, so the cleanest next pass is to walk that bucket from the biggest items downward.",
+    ]
+
+    return {
+        "headline": "Full-history story",
+        "summary": summary,
+        "events": events,
+        "other_breakdown": other_breakdown,
+        "jump_drivers": jump_drivers,
+    }
 
 
 def list_amortization_rules(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
