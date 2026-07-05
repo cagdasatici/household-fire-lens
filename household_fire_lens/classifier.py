@@ -1027,6 +1027,26 @@ def holiday_country(tx: Dict) -> str:
     return ""
 
 
+def holiday_content_text(tx: Dict) -> str:
+    """Transaction content only (no account_name/institution).
+
+    tx_text() also concatenates account_name/institution, e.g. "ING Credit Card" -
+    which itself contains "CREDIT CARD" and would wrongly match CARD_KEYWORDS on
+    every single credit-card-sourced transaction. Bill/transfer/settlement exclusion
+    checks must look only at what the transaction actually says, not what account it
+    came from.
+    """
+    return " ".join(
+        str(part or "").upper()
+        for part in [
+            tx.get("counterparty_name"),
+            tx.get("description"),
+            tx.get("normalized_merchant"),
+            tx.get("reference"),
+        ]
+    )
+
+
 def is_holiday_domestic(text: str) -> bool:
     if any(marker in text for marker in HOLIDAY_DOMESTIC_MARKERS):
         return True
@@ -1079,6 +1099,7 @@ def detect_holiday_trips(transactions: List[Dict]) -> Dict[int, str]:
         tx_date = parse_iso_date(tx["transaction_date"])
         own_country = holiday_country(tx)
         text = tx_text(tx)
+        content_text = holiday_content_text(tx)
         for trip in trips:
             if not (trip["start"] - pad <= tx_date <= trip["end"] + pad):
                 continue
@@ -1091,6 +1112,27 @@ def detect_holiday_trips(transactions: List[Dict]) -> Dict[int, str]:
                 continue
             if any(marker in text for marker in CASH_WITHDRAWAL_KEYWORDS):
                 continue
+            # Exclude anything that is clearly a bill/transfer/investment/card-settlement
+            # rather than retail spend abroad, even if it happens to fall in the window.
+            # Uses content_text (not tx_text) so account metadata like "ING Credit Card"
+            # never self-matches CARD_KEYWORDS and wipes out every card transaction.
+            if any(marker in content_text for marker in BANK_TRANSFER_KEYWORDS):
+                continue
+            if any(marker in content_text for marker in SAVINGS_KEYWORDS):
+                continue
+            if any(marker in content_text for marker in MORTGAGE_KEYWORDS):
+                continue
+            if any(marker in content_text for marker in INVESTMENT_KEYWORDS):
+                continue
+            if any(marker in content_text for marker in CARD_KEYWORDS):
+                continue
+            if DIRECT_DEBIT_CREDITOR_PATTERN.search(content_text):
+                continue
+            # Require SOME positive card/terminal signal before absorbing a row that
+            # has no explicit country marker -- pure window+exclusion is not enough
+            # evidence (own-account transfers with unrecognized wording can slip past
+            # the exclusion list above). Being conservative here over-includes real
+            # trip spend slightly less, but never mis-tags money movement as burn.
             if any(marker in text for marker in HOLIDAY_TERMINAL_MARKERS):
                 result[tx["id"]] = trip["label"]
                 break
