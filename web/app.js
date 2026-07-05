@@ -203,6 +203,28 @@ function renderBurnChart(months) {
     .join("");
 }
 
+function monthTooltip(row) {
+  const income = Number(row.real_income || 0);
+  const regular = Number(row.regular_income || 0);
+  const variable = Number(row.variable_income || 0);
+  const outflow = Number(row.household_spend_cashflow || 0);
+  const grossOutflow = Number(row.household_outflow_gross || 0);
+  const refunds = Number(row.refunds || 0);
+  const reimbursements = Number(row.reimbursements_cleared || 0);
+  const linked = Number(row.linked_reimbursements || 0);
+  const net = Number(row.household_net_pnl ?? income - outflow);
+  const cashMovement = Number(row.net_cash_change || 0);
+  return [
+    `${row.month}`,
+    `IN ${fmtPrecise(income)} = regular ${fmtPrecise(regular)} + variable ${fmtPrecise(variable)}`,
+    `OUT ${fmtPrecise(outflow)} = gross household ${fmtPrecise(grossOutflow)} - refunds ${fmtPrecise(refunds)} - reimbursements ${fmtPrecise(reimbursements)}`,
+    `Linked reimbursements ${fmtPrecise(linked)}`,
+    `NET ${fmtPrecise(net)} = IN - OUT`,
+    `Cash movement incl. transfers/investing ${fmtPrecise(cashMovement)}`,
+    `Invested ${fmtPrecise(row.wealth_allocation || 0)}; internal transfers ${fmtPrecise(row.internal_transfers || 0)}`,
+  ].join("\n");
+}
+
 function renderYearlyTable(years) {
   renderTable(
     "yearly-table",
