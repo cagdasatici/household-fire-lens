@@ -705,14 +705,16 @@ def spending_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
             if amount_2023 > 100:
                 change_pct = ((amount_2024 - amount_2023) / amount_2023) * 100 if amount_2023 else 0
                 if abs(change_pct) > 15:
+                    delta = amount_2024 - amount_2023
                     changes.append({
                         "category": category,
                         "amount_2023": money(amount_2023),
                         "amount_2024": money(amount_2024),
                         "change": f"{change_pct:+.1f}%",
-                        "delta": money(amount_2024 - amount_2023),
+                        "delta": money(delta),
+                        "_delta_numeric": delta,
                     })
-        changes.sort(key=lambda x: abs(float(x["delta"].replace("€", "").replace(",", "."))), reverse=True)
+        changes.sort(key=lambda x: abs(x["_delta_numeric"]), reverse=True)
         comparison["key_takeaways"].append({
             "title": "Year-over-year category shifts (2023 → 2024)",
             "items": changes[:5],
