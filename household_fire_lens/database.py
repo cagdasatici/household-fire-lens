@@ -220,8 +220,10 @@ def migrate(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS monthly_snapshots (
             month TEXT PRIMARY KEY,
             real_income REAL NOT NULL,
+            household_outflow_gross REAL NOT NULL DEFAULT 0,
             household_spend_cashflow REAL NOT NULL,
             household_spend_normalized REAL NOT NULL,
+            household_net_pnl REAL NOT NULL DEFAULT 0,
             mortgage_total REAL NOT NULL,
             mortgage_principal_estimate REAL NOT NULL,
             wealth_allocation REAL NOT NULL,
@@ -262,6 +264,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "accounts", "owner", "TEXT NOT NULL DEFAULT 'self'")
     ensure_column(conn, "transaction_annotations", "digest_tier", "TEXT NOT NULL DEFAULT 'auto_visible'")
     ensure_column(conn, "review_items", "expected_event_id", "INTEGER REFERENCES expected_income_events(id)")
+    ensure_column(conn, "monthly_snapshots", "household_outflow_gross", "REAL NOT NULL DEFAULT 0")
+    ensure_column(conn, "monthly_snapshots", "household_net_pnl", "REAL NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_expected_event ON review_items(expected_event_id)")
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)",

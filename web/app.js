@@ -128,25 +128,62 @@ function renderBurnChart(months) {
     return;
   }
   const recent = months.slice(-12);
-  const max = Math.max(...recent.map((row) => Number(row.household_spend_normalized || 0)), 1);
+  const max = Math.max(
+    ...recent.flatMap((row) => [
+      Number(row.real_income || 0),
+      Math.max(0, Number(row.household_spend_cashflow || 0)),
+    ]),
+    1,
+  );
   chart.innerHTML = recent
     .map((row) => {
-      const normalized = Number(row.household_spend_normalized || 0);
-      const cashflow = Number(row.household_spend_cashflow || 0);
-      const width = Math.max(2, Math.round((normalized / max) * 100));
-      const cashWidth = Math.max(2, Math.round((cashflow / max) * 100));
+      const income = Number(row.real_income || 0);
+      const outflow = Number(row.household_spend_cashflow || 0);
+      const net = Number(row.household_net_pnl ?? income - outflow);
+      const cashMovement = Number(row.net_cash_change || 0);
+      const incomeWidth = income ? Math.max(2, Math.round((income / max) * 100)) : 0;
+      const outflowWidth = outflow > 0 ? Math.max(2, Math.round((outflow / max) * 100)) : 0;
       return `
-        <div class="bar-row layered">
+        <div class="bar-row monthly-flow-row" title="${escapeHtml(monthTooltip(row))}">
           <span>${escapeHtml(row.month)}</span>
           <div class="bar-stack">
-            <div class="bar-track slim"><div class="bar-fill cashflow" style="width: ${cashWidth}%"></div></div>
-            <div class="bar-track"><div class="bar-fill" style="width: ${width}%"></div></div>
+            <div class="flow-bar-line">
+              <small>In</small>
+              <div class="bar-track"><div class="bar-fill income" style="width: ${incomeWidth}%"></div></div>
+              <strong>${fmtMoney(income)}</strong>
+            </div>
+            <div class="flow-bar-line">
+              <small>Out</small>
+              <div class="bar-track"><div class="bar-fill outflow" style="width: ${outflowWidth}%"></div></div>
+              <strong>${fmtMoney(outflow)}</strong>
+            </div>
           </div>
-          <strong>${fmtMoney(normalized)}</strong>
+          <div class="flow-net">
+            <strong class="${net >= 0 ? "positive" : "negative"}">${fmtMoney(net)}</strong>
+            <small>cash ${fmtMoney(cashMovement)}</small>
+          </div>
         </div>
       `;
     })
     .join("");
+}
+
+function monthTooltip(row) {
+  const income = Number(row.real_income || 0);
+  const outflow = Number(row.household_spend_cashflow || 0);
+  const grossOutflow = Number(row.household_outflow_gross || 0);
+  const refunds = Number(row.refunds || 0);
+  const reimbursements = Number(row.reimbursements_cleared || 0);
+  const net = Number(row.household_net_pnl ?? income - outflow);
+  const cashMovement = Number(row.net_cash_change || 0);
+  return [
+    `${row.month}`,
+    `IN ${fmtPrecise(income)}`,
+    `OUT ${fmtPrecise(outflow)} = gross household ${fmtPrecise(grossOutflow)} - refunds ${fmtPrecise(refunds)} - reimbursements cleared ${fmtPrecise(reimbursements)}`,
+    `NET ${fmtPrecise(net)} = IN - OUT`,
+    `Cash movement incl. transfers/investing ${fmtPrecise(cashMovement)}`,
+    `Invested ${fmtPrecise(row.wealth_allocation || 0)}; internal transfers ${fmtPrecise(row.internal_transfers || 0)}`,
+  ].join("\n");
 }
 
 function renderTrustList(health) {
@@ -273,12 +310,13 @@ async function loadFlow() {
     [
       { key: "month", label: "Month" },
       { key: "real_income", label: "Income", number: true, render: (row) => fmtPrecise(row.real_income) },
-      { key: "household_spend_cashflow", label: "Cashflow burn", number: true, render: (row) => fmtPrecise(row.household_spend_cashflow) },
+      { key: "household_spend_cashflow", label: "Household out", number: true, render: (row) => fmtPrecise(row.household_spend_cashflow) },
+      { key: "household_net_pnl", label: "Household net", number: true, render: (row) => fmtPrecise(row.household_net_pnl) },
       { key: "household_spend_normalized", label: "FIRE burn", number: true, render: (row) => fmtPrecise(row.household_spend_normalized) },
       { key: "mortgage_total", label: "Mortgage", number: true, render: (row) => fmtPrecise(row.mortgage_total) },
       { key: "wealth_allocation", label: "Invested", number: true, render: (row) => fmtPrecise(row.wealth_allocation) },
       { key: "reimbursements_cleared", label: "Reimb. cleared", number: true, render: (row) => fmtPrecise(row.reimbursements_cleared) },
-      { key: "net_cash_change", label: "Net cash", number: true, render: (row) => fmtPrecise(row.net_cash_change) },
+      { key: "net_cash_change", label: "Cash movement", number: true, render: (row) => fmtPrecise(row.net_cash_change) },
       { key: "savings_rate_fire", label: "FIRE savings", number: true, render: (row) => fmtPercent(row.savings_rate_fire) },
     ],
     data.months || [],

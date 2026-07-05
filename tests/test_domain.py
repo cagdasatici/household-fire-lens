@@ -125,8 +125,41 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(january["reimbursements_cleared"], 120.0)
         self.assertEqual(january["refunds"], 20.0)
         self.assertEqual(january["mortgage_total"], 1500.0)
+        self.assertEqual(january["household_outflow_gross"], 2080.0)
         # Groceries 100 + card 300 + utility 180 + mortgage 1500 - refund 20 - reimbursement 120.
         self.assertEqual(january["household_spend_normalized"], 1940.0)
+        self.assertEqual(january["household_net_pnl"], 3060.0)
+
+    def test_monthly_pnl_identity_ignores_transfers_and_fifo_clears_later_reimbursements(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-24,ING Main,Wage/Salary 202601 ING,Booking.com Payroll,5000.00,EUR
+2026-01-27,ING Main,VISA CREDITCARD settlement,VISA CREDITCARD,-1000.00,EUR
+2026-01-28,ING Main,Interactive Brokers withdrawal,Interactive Brokers,10000.00,EUR
+2026-02-10,ING Main,Booking.com expense reimbursement,Booking.com B.V.,600.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-monthly-pnl.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+            account_hint="ING Main",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        snapshot = fire_snapshot(self.conn)
+        rows = {row["month"]: row for row in snapshot["months"]}
+        january = rows["2026-01"]
+        february = rows["2026-02"]
+
+        self.assertEqual(january["real_income"], 5000.0)
+        self.assertEqual(january["household_outflow_gross"], 1000.0)
+        self.assertEqual(january["reimbursements_cleared"], 600.0)
+        self.assertEqual(january["household_spend_cashflow"], 400.0)
+        self.assertEqual(january["household_net_pnl"], 4600.0)
+        self.assertEqual(january["net_cash_change"], 14000.0)
+        self.assertEqual(february["reimbursements_received"], 600.0)
+        self.assertEqual(february["household_net_pnl"], 0.0)
 
     def test_split_payroll_and_bonus_are_income_without_pay_window_false_positives(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

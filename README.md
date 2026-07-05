@@ -8,7 +8,8 @@ Local-first household economics for FIRE planning. Import messy yearly bank and 
 - Keeps raw imported rows immutable and stores cleaned transactions separately.
 - Classifies transactions into economic classes such as income, household spend, wealth allocation, internal transfer, mortgage/debt service, refunds, and reimbursement pass-throughs.
 - Detects salary using recurring payer, date window, and amount similarity.
-- Clears Booking.com reimbursements and pairs imported credit-card settlements so card detail is counted once.
+- Clears Booking.com reimbursements across month boundaries and pairs imported credit-card settlements so card detail is counted once.
+- Separates household P&L from all-cash movement, so transfers and investing never appear as monthly surplus or burn.
 - Separates Cashflow and Normalized FIRE views.
 - Shows FIRE burn, savings rate, investment rate, optimization opportunities, recurring spend, data-health warnings, review items, and drillable transaction tables.
 - Suggests amortization rules for lumpy annual expenses and applies them only after approval.
@@ -24,7 +25,7 @@ python3 -m household_fire_lens
 Then open:
 
 ```text
-http://127.0.0.1:8787
+http://127.0.0.1:8788
 ```
 
 By default the app creates a local SQLite database at:

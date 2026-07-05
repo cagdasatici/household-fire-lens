@@ -345,9 +345,43 @@ th.number {
   grid-template-columns: 82px 1fr 118px;
 }
 
+.bar-row.monthly-flow-row {
+  grid-template-columns: 82px minmax(0, 1fr) 120px;
+}
+
 .bar-stack {
   display: grid;
   gap: 4px;
+}
+
+.flow-bar-line {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 112px;
+  align-items: center;
+  gap: 8px;
+}
+
+.flow-bar-line small {
+  color: var(--muted);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.flow-bar-line strong {
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.flow-net {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.flow-net small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .bar-track {
@@ -370,6 +404,22 @@ th.number {
 
 .bar-fill.cashflow {
   background: var(--accent-3);
+}
+
+.bar-fill.income {
+  background: linear-gradient(90deg, #38d39f, #8ee6c7);
+}
+
+.bar-fill.outflow {
+  background: linear-gradient(90deg, #f0b84c, #f5d27c);
+}
+
+.positive {
+  color: #8ee6c7;
+}
+
+.negative {
+  color: #f0b84c;
 }
 
 .bar-fill.medium {

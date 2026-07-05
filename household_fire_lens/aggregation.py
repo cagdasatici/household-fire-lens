@@ -58,23 +58,27 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
             - values["refunds"]
             - values["reimbursements_cleared"]
         )
+        gross_outflow = values["household_spend"] + values["mortgage_total"]
         normalized_burn = cashflow_burn - values["amortized_cashflow_replaced"] + values["amortized_monthly_addition"]
+        household_net_pnl = real_income - cashflow_burn
         savings_rate_cashflow = ((real_income - cashflow_burn) / real_income) if real_income else None
         savings_rate_fire = ((real_income - normalized_burn) / real_income) if real_income else None
         conn.execute(
             """
             INSERT INTO monthly_snapshots (
-                month, real_income, household_spend_cashflow, household_spend_normalized,
-                mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
+                month, real_income, household_outflow_gross, household_spend_cashflow, household_spend_normalized,
+                household_net_pnl, mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
                 reimbursements_received, reimbursements_cleared, refunds, net_cash_change,
                 savings_rate_cashflow, savings_rate_fire
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 month,
                 money(real_income),
+                money(gross_outflow),
                 money(cashflow_burn),
                 money(max(0, normalized_burn)),
+                money(household_net_pnl),
                 money(values["mortgage_total"]),
                 money(values["wealth_allocation"]),
                 money(values["internal_transfers"]),
@@ -134,12 +138,31 @@ def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
         elif cls == "refund":
             months[month]["refunds"] += max(amount, 0)
 
+    apply_reimbursement_fifo(months, unknown_card_spend)
     for month, values in months.items():
-        values["reimbursements_cleared"] = min(values["reimbursements_received"], unknown_card_spend[month])
         values["amortized_cashflow_replaced"] = 0.0
         values["amortized_monthly_addition"] = 0.0
     apply_amortization(conn, months)
     return months
+
+
+def apply_reimbursement_fifo(months: Dict[str, Dict[str, float]], unknown_card_spend: Dict[str, float]) -> None:
+    pending_spend: List[List[Any]] = []
+    for month in sorted(months):
+        if unknown_card_spend[month] > 0:
+            pending_spend.append([month, unknown_card_spend[month]])
+
+        reimbursement = months[month]["reimbursements_received"]
+        while reimbursement > 0.005 and pending_spend:
+            spend_month, open_amount = pending_spend[0]
+            cleared = min(reimbursement, open_amount)
+            months[spend_month]["reimbursements_cleared"] += cleared
+            reimbursement -= cleared
+            open_amount -= cleared
+            if open_amount <= 0.005:
+                pending_spend.pop(0)
+            else:
+                pending_spend[0][1] = open_amount
 
 
 def apply_amortization(conn: sqlite3.Connection, months: Dict[str, Dict[str, float]]) -> None:
@@ -224,8 +247,21 @@ def list_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def assert_monthly_pnl_identity(snapshots: List[Dict[str, Any]]) -> None:
+    for row in snapshots:
+        income = float(row["real_income"])
+        outflow = float(row["household_spend_cashflow"])
+        net = float(row["household_net_pnl"])
+        if abs(net - (income - outflow)) >= 0.01:
+            raise AssertionError(
+                f"Monthly P&L identity failed for {row['month']}: "
+                f"net {net:.2f} != income {income:.2f} - outflow {outflow:.2f}"
+            )
+
+
 def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0) -> Dict[str, Any]:
     snapshots = list_monthly_snapshots(conn)
+    assert_monthly_pnl_identity(snapshots)
     if not snapshots:
         return {
             "months": [],

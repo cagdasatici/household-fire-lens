@@ -391,6 +391,9 @@ def classify_transaction(
                 rule_id=rule["id"],
             )
 
+    if is_booking_invoice_reimbursement(tx):
+        return Annotation("reimbursement_pass_through", "Reimbursements", "Company Expense", 0.94, "Booking.com invoice/expense reimbursement")
+
     if tx["id"] in salary_set:
         if is_cash_bonus_income(tx):
             return Annotation("income", "Income", "Cash Bonus", 0.94, "February payroll bonus pattern")
@@ -661,6 +664,22 @@ def is_cash_bonus_income(tx: Dict) -> bool:
     amount = float(tx["amount"])
     tx_date = parse_iso_date(tx["transaction_date"])
     return amount > 0 and (has_bonus_keyword(tx) or (tx_date.month == 2 and has_salary_keyword(tx) and amount >= 15000))
+
+
+def is_booking_invoice_reimbursement(tx: Dict) -> bool:
+    amount = float(tx["amount"])
+    text = signal_text(tx)
+    return (
+        amount > 0
+        and "BOOKING" in text
+        and (
+            "/INV/" in text
+            or " INVOICE " in f" {text} "
+            or "EXPENSE" in text
+            or "REIMBURSE" in text
+        )
+        and not has_salary_keyword(tx)
+    )
 
 
 def is_rsu_window(day: date) -> bool:

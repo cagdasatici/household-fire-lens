@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .aggregation import (
+    assert_monthly_pnl_identity,
     fire_snapshot,
     list_amortization_rules,
     optimization_insights,
@@ -33,7 +34,7 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 WEB_ROOT = APP_ROOT / "web"
 RUN_DIR = APP_ROOT / ".household-fire-lens"
 DEFAULT_DB = RUN_DIR / "household-fire-lens.sqlite3"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 8788
 PIDFILE = RUN_DIR / "server.pid"
 
 
@@ -149,10 +150,12 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json({"transactions": self.list_review_group_transactions(review_id)})
         elif path == "/api/dashboard/fire":
             fire_multiple = float((query.get("multiple") or ["25"])[0])
+            recompute_monthly_snapshots(self.conn)
             self.send_json(fire_snapshot(self.conn, fire_multiple))
         elif path == "/api/dashboard/monthly-flow":
-            recompute_monthly_snapshots(self.conn)
-            self.send_json({"months": fetch_all(self.conn, "SELECT * FROM monthly_snapshots ORDER BY month")})
+            months = recompute_monthly_snapshots(self.conn)
+            assert_monthly_pnl_identity(months)
+            self.send_json({"months": months})
         elif path == "/api/dashboard/spending":
             self.send_json(spending_breakdown(self.conn))
         elif path == "/api/dashboard/optimization":
