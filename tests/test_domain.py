@@ -555,7 +555,7 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows["BELASTINGDIENST"]["economic_class"], "refund")
         self.assertEqual(rows["BELASTINGDIENST"]["category"], "Taxes and Government")
         self.assertEqual(rows["STICHTING EXAMPLE"]["economic_class"], "reimbursement_pass_through")
-        self.assertEqual(rows["DIERENARTSPRAKTIJK WEST"]["category"], "Health")
+        self.assertEqual(rows["DIERENARTSPRAKTIJK WEST"]["category"], "Pet Care")
         self.assertEqual(rows["KWIKFIT"]["category"], "Transportation")
         self.assertEqual(rows["HENDERS EN HAZEL"]["category"], "Home and Furniture")
         self.assertEqual(rows["RIVERTY GMBH"]["category"], "Other")

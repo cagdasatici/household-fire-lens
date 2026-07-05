@@ -462,6 +462,18 @@ th.number {
   font-size: 13px;
 }
 
+.inline-status[data-tone="success"] {
+  color: var(--good);
+}
+
+.inline-status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.inline-status[data-tone="info"] {
+  color: var(--accent-3);
+}
+
 .review-details {
   grid-column: 1 / -1;
   overflow-x: auto;

@@ -248,10 +248,20 @@ async function renderMonthAudit(month) {
   state.auditMonth = month;
   document.getElementById("month-audit-title").textContent = `${month} OUT Drilldown`;
   panel.classList.remove("hidden");
+  setAuditStatus("Loading OUT transactions...");
   list.innerHTML = `<p class="empty">Loading month audit...</p>`;
-  const data = await api(`/api/month-audit?month=${encodeURIComponent(month)}`);
+  let data;
+  try {
+    data = await api(`/api/month-audit?month=${encodeURIComponent(month)}`);
+  } catch (error) {
+    setAuditStatus(error.message, "error");
+    list.innerHTML = `<p class="empty">Could not load this month.</p>`;
+    return;
+  }
   if (!data.rows.length) {
+    setAuditStatus("No household OUT transactions in this month.");
     list.innerHTML = `<p class="empty">No household outflow rows for this month.</p>`;
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
   const rows = data.rows || [];
@@ -295,6 +305,8 @@ async function renderMonthAudit(month) {
           <button data-audit-action="classify" data-class="household_spend" data-category="Eating Out" data-subcategory="" data-transaction="${row.id}">Eating out</button>
           <button data-audit-action="classify" data-category="Education" data-subcategory="Professional Education" data-transaction="${row.id}">Education</button>
           <button data-audit-action="classify" data-category="Holiday" data-subcategory="" data-transaction="${row.id}">Holiday</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Health" data-subcategory="" data-transaction="${row.id}">Health</button>
+          <button data-audit-action="classify" data-class="household_spend" data-category="Pet Care" data-subcategory="" data-transaction="${row.id}">Pet care</button>
           <button data-audit-action="classify" data-class="household_spend" data-category="Home and Furniture" data-subcategory="" data-transaction="${row.id}">Home</button>
           <button data-audit-action="classify" data-category="Shopping" data-subcategory="" data-transaction="${row.id}">Shopping</button>
           <button data-audit-action="classify" data-category="Other" data-subcategory="" data-transaction="${row.id}">Other</button>
@@ -306,7 +318,15 @@ async function renderMonthAudit(month) {
       </article>
     `)
     .join("");
+  setAuditStatus(`${rows.length} OUT transactions loaded. Click a row action to correct and recalculate.`);
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function setAuditStatus(message, tone = "info") {
+  const status = document.getElementById("month-audit-status");
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
 }
 
 async function handleAuditAction(button) {
@@ -317,14 +337,25 @@ async function handleAuditAction(button) {
     category: button.dataset.category,
     subcategory: button.dataset.subcategory || "",
   } : {};
+  const originalText = button.textContent;
   button.disabled = true;
-  await api(`/api/transactions/${txId}/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  await refreshAll();
-  if (state.auditMonth) await renderMonthAudit(state.auditMonth);
+  button.textContent = "Saving...";
+  setAuditStatus(`Saving ${originalText} for transaction ${txId}...`);
+  try {
+    await api(`/api/transactions/${txId}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setAuditStatus("Saved. Recalculating dashboard...");
+    await refreshAll();
+    if (state.auditMonth) await renderMonthAudit(state.auditMonth);
+    setAuditStatus("Saved and recalculated.", "success");
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = originalText;
+    setAuditStatus(error.message, "error");
+  }
 }
 
 function renderTrustList(health) {
@@ -875,24 +906,32 @@ function bindImport() {
 }
 
 document.addEventListener("click", (event) => {
-  if (event.target.matches("[data-review-details]")) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const reviewDetailsButton = target.closest("[data-review-details]");
+  const reviewButton = target.closest("[data-review]");
+  const amortizationButton = target.closest("[data-amortization]");
+  const monthButton = target.closest("[data-month]");
+  const auditActionButton = target.closest("[data-audit-action]");
+  if (reviewDetailsButton) {
     event.preventDefault();
-    toggleReviewDetails(event.target);
+    toggleReviewDetails(reviewDetailsButton);
   }
-  if (event.target.matches("[data-review]")) {
+  if (reviewButton) {
     event.preventDefault();
-    resolveReview(event.target);
+    resolveReview(reviewButton);
   }
-  if (event.target.matches("[data-amortization]")) {
-    setAmortizationStatus(event.target);
-  }
-  if (event.target.matches("[data-month]")) {
+  if (amortizationButton) {
     event.preventDefault();
-    renderMonthAudit(event.target.dataset.month);
+    setAmortizationStatus(amortizationButton);
   }
-  if (event.target.matches("[data-audit-action]")) {
+  if (monthButton) {
     event.preventDefault();
-    handleAuditAction(event.target);
+    renderMonthAudit(monthButton.dataset.month);
+  }
+  if (auditActionButton) {
+    event.preventDefault();
+    handleAuditAction(auditActionButton);
   }
 });
 
