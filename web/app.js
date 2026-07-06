@@ -126,8 +126,8 @@ function renderTable(id, columns, rows) {
 
 function periodQuery() {
   const selector = document.getElementById("period-selector");
-  if (selector && selector.dataset.loadedYears) {
-    state.period = selector.value;
+  if (selector) {
+    state.period = selector.value || state.period || "year:2026";
   } else if (!state.period) {
     state.period = "year:2026";
   }
@@ -159,7 +159,7 @@ function renderPeriodOptions(years) {
   if (!selector || selector.dataset.loadedYears === years.join(",")) return;
   const availableYears = [...years].sort();
   const latestYear = availableYears[availableYears.length - 1] || "2026";
-  const current = selector.value || state.period || `year:${latestYear}`;
+  const current = state.period || selector.value || `year:${latestYear}`;
   const recentTwo = availableYears.slice(-2);
   const recentThree = availableYears.slice(-3);
   selector.innerHTML = `
@@ -185,6 +185,7 @@ function renderPeriodOptions(years) {
     <option value="all">All</option>
   `;
   selector.value = [...selector.options].some((option) => option.value === current) ? current : `year:${latestYear}`;
+  state.period = selector.value;
   selector.dataset.loadedYears = years.join(",");
 }
 
@@ -222,6 +223,7 @@ function bucketTotalsLabel(row) {
   if (category === "Unknown Card Spend") return "Card spend";
   if (category === "Home and Furniture") return "Home";
   if (category === "Banking and Fees") return "Fees";
+  if (category === "ING monthly") return "Fees";
   if (category === "Taxes and Government") return "Taxes";
   if (category === "Inter-account Transfers") return "Transfers";
   if (category === "Wealth Allocation") return "Investments";
@@ -1223,11 +1225,11 @@ function renderBucketTrendChart() {
   const lookup = new Map(bucketRows.map((row) => [`${row.period}|${bucketRowLabel(row)}`, Number(row.outflow || 0)]));
   const max = Math.max(...periods.flatMap((period) => labels.map((label) => Number(lookup.get(`${period}|${label}`) || 0))), 1);
   const width = Math.max(760, periods.length * 82 + 96);
-  const height = 300;
+  const height = 312;
   const left = 56;
   const right = width - 20;
   const top = 24;
-  const bottom = 252;
+  const bottom = 258;
   const plotHeight = bottom - top;
   const step = periods.length > 1 ? (right - left) / (periods.length - 1) : 0;
   const legend = labels
@@ -1244,12 +1246,16 @@ function renderBucketTrendChart() {
   target.innerHTML = `
     <div class="bucket-chart-meta">
       <div class="bucket-chart-note">Trend lines for the biggest consolidated buckets.</div>
-      <div class="bucket-chart-note">Click a chip to focus the lines.</div>
+      <div class="bucket-chart-note">Hover points for values. The y-axis is outflow in euros.</div>
     </div>
     <div class="bucket-chart-scroll">
       <svg class="bucket-svg trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Bucket trend chart by ${state.bucketChartMode}">
         <line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" class="bucket-axis"></line>
         <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" class="bucket-axis"></line>
+        <text x="12" y="${top + 6}" class="bucket-axis-label">${fmtMoney(max)}</text>
+        <text x="12" y="${(top + bottom) / 2 + 4}" class="bucket-axis-label">${fmtMoney(max / 2)}</text>
+        <text x="12" y="${bottom + 4}" class="bucket-axis-label">0</text>
+        <text x="${left}" y="${top - 8}" class="bucket-axis-title">OUTFLOW</text>
         ${labels
           .map((label) => {
             const points = periods
@@ -1267,7 +1273,7 @@ function renderBucketTrendChart() {
                   const value = Number(lookup.get(`${period}|${label}`) || 0);
                   const x = periods.length > 1 ? left + index * step : (left + right) / 2;
                   const y = bottom - Math.round((value / max) * plotHeight);
-                  return `<circle cx="${x}" cy="${y}" r="3.5" fill="${bucketTrendColor(label)}"><title>${escapeHtml(`${period} · ${label} · ${fmtPrecise(value)}`)}</title></circle>`;
+                  return `<circle cx="${x}" cy="${y}" r="3.5" fill="${bucketTrendColor(label)}" class="bucket-trend-point"><title>${escapeHtml(`${period} · ${label} · ${fmtPrecise(value)}`)}</title></circle>`;
                 })
                 .join("")}
             `;
@@ -1409,9 +1415,9 @@ function renderBucketChart() {
     1,
   );
   const width = Math.max(760, series.length * 82 + 96);
-  const height = 308;
+  const height = 330;
   const top = 26;
-  const bottom = 276;
+  const bottom = 294;
   const axisY = 158;
   const band = 104;
   const left = 52;
@@ -1421,11 +1427,11 @@ function renderBucketChart() {
 
   chart.innerHTML = `
     <div class="bucket-chart-meta">
-      <div class="bucket-chart-note">Toggle IN / OUT independently, then click chips to focus the buckets.</div>
+      <div class="bucket-chart-note">OUT is drawn above the line and IN below it. Toggle each side independently, then click chips to focus the buckets.</div>
       <div class="bucket-chart-note">${state.bucketFilters.length ? `${state.bucketFilters.length} bucket${state.bucketFilters.length === 1 ? "" : "s"} selected` : "All buckets selected"}</div>
     </div>
     <div class="bucket-chart-scroll">
-      <svg class="bucket-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Cashflow chart by ${state.bucketChartMode}">
+      <svg class="bucket-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Cashflow chart by ${state.bucketChartMode} with outflow above and income below">
         <defs>
           <linearGradient id="bucket-income-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
             <stop offset="0%" stop-color="#39d39f"></stop>
@@ -1435,19 +1441,23 @@ function renderBucketChart() {
         <line x1="${left}" y1="${axisY}" x2="${right}" y2="${axisY}" class="bucket-axis"></line>
         <text x="12" y="${top + 6}" class="bucket-axis-label">${fmtMoney(reference)}</text>
         <text x="12" y="${axisY + 14}" class="bucket-axis-label">0</text>
+        <text x="${left}" y="${top - 8}" class="bucket-axis-title">OUT</text>
+        <text x="${left}" y="${bottom + 18}" class="bucket-axis-title">IN</text>
         ${series
           .map((row, index) => {
             const center = left + index * step + step / 2;
             const incomeHeight = showIncome ? Math.round((Math.min(row.income, reference) / reference) * band) : 0;
             const incomeOverflow = showIncome && row.income > reference;
-            let offset = 0;
+            const outflowHeight = showOutflow ? Math.min(band, Math.round((Math.min(row.outflow, reference) / reference) * band)) : 0;
+            const outflowOverflow = showOutflow && row.outflow > reference;
+            let outflowOffset = 0;
             const outflowSegments = showOutflow
               ? row.selectedOutflow
                   .filter((segment) => segment.amount > 0.005)
                   .map((segment) => {
                     const segHeight = Math.max(2, Math.round((Math.min(segment.amount, reference) / reference) * band));
-                    const y = axisY + offset;
-                    offset += segHeight;
+                    const y = axisY - outflowOffset - segHeight;
+                    outflowOffset += segHeight;
                     return `
                       <rect x="${center - barWidth / 2}" y="${y}" width="${barWidth}" height="${segHeight}" rx="3" fill="${bucketColor(segment.label)}">
                         <title>${escapeHtml(`${row.period} · ${segment.label} · ${fmtPrecise(segment.amount)}`)}</title>
@@ -1456,19 +1466,18 @@ function renderBucketChart() {
                   })
                   .join("")
               : "";
-            const outflowOverflow = showOutflow && row.outflow > reference;
-            const outflowHeight = showOutflow ? Math.min(band, Math.round((Math.min(row.outflow, reference) / reference) * band)) : 0;
             const periodTitle = `${row.period}${showIncome ? `\nIN ${fmtPrecise(row.income)}` : ""}${showOutflow ? `\nOUT ${fmtPrecise(row.outflow)}` : ""}${state.bucketFilters.length ? `\nBuckets ${state.bucketFilters.join(", ")}` : ""}`;
             return `
               <g>
                 <title>${escapeHtml(periodTitle)}</title>
-                ${showIncome ? `<rect x="${center - barWidth / 2}" y="${axisY - incomeHeight}" width="${barWidth}" height="${incomeHeight}" rx="3" class="bucket-income"></rect>` : ""}
-                ${incomeOverflow ? `<text x="${center}" y="${axisY - band - 6}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
+                ${showOutflow ? `<rect x="${center - barWidth / 2}" y="${axisY - outflowHeight}" width="${barWidth}" height="${outflowHeight}" rx="3" class="bucket-outflow"></rect>` : ""}
                 ${outflowSegments}
-                ${outflowOverflow ? `<text x="${center}" y="${axisY + outflowHeight + 14}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
+                ${outflowOverflow ? `<text x="${center}" y="${axisY - band - 6}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
                 <text x="${center}" y="${bottom + 12}" text-anchor="middle" class="bucket-period">${escapeHtml(shortPeriodLabel(row.period, state.bucketChartMode))}</text>
-                ${showIncome ? `<text x="${center}" y="${axisY - incomeHeight - 6}" text-anchor="middle" class="bucket-value">${fmtMoney(row.income)}</text>` : ""}
-                ${showOutflow ? `<text x="${center}" y="${axisY + outflowHeight + 28}" text-anchor="middle" class="bucket-value">${fmtMoney(row.outflow)}</text>` : ""}
+                ${showOutflow ? `<text x="${center}" y="${axisY - outflowHeight - 8}" text-anchor="middle" class="bucket-value">${fmtMoney(row.outflow)}</text>` : ""}
+                ${showIncome ? `<rect x="${center - barWidth / 2}" y="${axisY}" width="${barWidth}" height="${incomeHeight}" rx="3" class="bucket-income"></rect>` : ""}
+                ${incomeOverflow ? `<text x="${center}" y="${axisY + band + 14}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
+                ${showIncome ? `<text x="${center}" y="${axisY + incomeHeight + 20}" text-anchor="middle" class="bucket-value">${fmtMoney(row.income)}</text>` : ""}
               </g>
             `;
           })

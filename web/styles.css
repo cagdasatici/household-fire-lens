@@ -770,6 +770,13 @@ th.number {
   font-size: 11px;
 }
 
+.bucket-axis-title {
+  fill: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
 .bucket-period {
   fill: var(--ink);
   font-size: 11px;
@@ -789,6 +796,16 @@ th.number {
 
 .bucket-income {
   fill: url(#bucket-income-gradient);
+}
+
+.bucket-outflow {
+  fill: rgba(242, 184, 75, 0.12);
+  stroke: rgba(242, 184, 75, 0.35);
+  stroke-width: 1;
+}
+
+.bucket-trend-point {
+  cursor: pointer;
 }
 
 .wide-matrix {

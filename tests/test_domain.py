@@ -388,6 +388,25 @@ class DomainTests(unittest.TestCase):
         self.assertEqual([row["month"] for row in combined], ["2025-01", "2025-12", "2026-02"])
         self.assertEqual([row["month"] for row in three_years], ["2024-12", "2025-01", "2025-12", "2026-02"])
 
+    def test_fire_snapshot_multi_year_period_keeps_the_full_window(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2024-01-01,Main,Hotel booking,Booking.com,-100.00,EUR
+2025-01-01,Main,Hotel booking,Booking.com,-200.00,EUR
+2026-01-01,Main,Hotel booking,Booking.com,-300.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-fire-period.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        snapshot = fire_snapshot(self.conn, period="years:2024,2025,2026")
+        self.assertEqual([row["month"] for row in snapshot["months"]], ["2024-01", "2025-01", "2026-01"])
+        self.assertEqual(len(snapshot["years"]), 3)
+
     def test_spending_insights_cover_all_adjacent_year_pairs(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2023-05-01,Main,Hotel booking,Booking.com,-300.00,EUR
