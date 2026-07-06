@@ -5,6 +5,7 @@ from pathlib import Path
 from household_fire_lens.aggregation import (
     fire_snapshot,
     filter_snapshots_for_period,
+    fixed_merchant_match,
     optimization_insights,
     recompute_monthly_snapshots,
     spending_insights,
@@ -15,6 +16,7 @@ from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
 from household_fire_lens.importer import import_csv, import_directory
+from household_fire_lens.server import HouseholdFireLensHandler
 from household_fire_lens.parsers import (
     normalize_merchant,
     parse_abn_annual_overview_pdf_text,
@@ -122,6 +124,11 @@ class DomainTests(unittest.TestCase):
         )
         classify_all(self.conn)
         recompute_monthly_snapshots(self.conn)
+
+    def handler(self):
+        handler = object.__new__(HouseholdFireLensHandler)
+        handler.server = type("Server", (), {"conn": self.conn})()
+        return handler
 
     def test_salary_reimbursement_investment_refund_and_mortgage_math(self):
         self.import_and_classify()
@@ -425,6 +432,14 @@ class DomainTests(unittest.TestCase):
         self.assertEqual([row["month"] for row in snapshot["months"]], ["2024-01", "2025-01", "2026-01"])
         self.assertEqual(len(snapshot["years"]), 3)
 
+    def test_fire_snapshot_empty_summary_has_baseline_keys(self):
+        snapshot = fire_snapshot(self.conn, period="year:2026")
+        summary = snapshot["summary"]
+        for key in ("fixed_floor", "quasi_fixed_average", "variable_average", "average_months", "excluded_partial_month"):
+            self.assertIn(key, summary)
+        self.assertEqual(summary["fixed_floor"], 0)
+        self.assertEqual(summary["variable_average"], 0)
+
     def test_fire_snapshot_excludes_current_partial_month_from_burn_average(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
 2026-06-01,Main,Hotel booking,Booking.com,-1200.00,EUR
@@ -443,6 +458,10 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["monthly_burn"], 1200.0)
         self.assertEqual(snapshot["summary"]["average_months"], 1)
         self.assertEqual(snapshot["summary"]["excluded_partial_month"], "2026-07")
+
+    def test_fixed_merchant_match_does_not_match_eczane_substrings(self):
+        self.assertTrue(fixed_merchant_match("CZ Groep Zorgverzekering"))
+        self.assertFalse(fixed_merchant_match("SAGLIK ECZANESI ISTANBUL"))
 
     def test_spending_insights_cover_all_adjacent_year_pairs(self):
         rows = ["Date,Account,Description,Counterparty,Amount,Currency"]
@@ -566,6 +585,41 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(rows["VUELING"], "Holiday")
         self.assertEqual(rows["TWISTER AMSTELVEEN"], "Eating Out")
         self.assertEqual(rows["WOOLSOCKS AG"], "Shopping")
+
+    def test_month_audit_accepts_bucket_category_filter(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,VUELING AIRLINE TICKET,Vueling,-250.00,EUR
+2026-05-02,Main,TWISTER AMSTELVEEN lunch,Twister Amstelveen,-18.50,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-month-audit-category.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = self.handler().month_audit("2026-05", category="Holiday")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["category"], "Holiday")
+
+    def test_bucket_drilldown_returns_bucket_transactions(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,VUELING AIRLINE TICKET,Vueling,-250.00,EUR
+2026-05-02,Main,TWISTER AMSTELVEEN lunch,Twister Amstelveen,-18.50,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-bucket-drilldown.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        rows = self.handler().bucket_drilldown({"category": ["Holiday"], "month": ["2026-05"]})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["category"], "Holiday")
 
     def test_cash_withdrawal_terminal_and_processor_descriptions_are_not_review(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

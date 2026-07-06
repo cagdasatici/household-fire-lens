@@ -125,6 +125,24 @@ button:hover {
   color: white;
 }
 
+.link-button {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  border-radius: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: var(--accent);
+  outline: none;
+  text-decoration: underline;
+}
+
 .sort-button {
   background: transparent;
   border: 1px solid var(--line);
@@ -836,6 +854,11 @@ th.number {
 
 .matrix-row > * {
   padding: 9px 10px;
+}
+
+.bucket-drill-button {
+  width: 100%;
+  text-align: inherit;
 }
 
 .matrix-row.header {

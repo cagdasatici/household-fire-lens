@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from collections import defaultdict
 from datetime import date
 from typing import Any, Dict, Iterable, List, Tuple
@@ -49,6 +50,28 @@ FIXED_MERCHANT_PATTERNS = (
 
 QUASI_FIXED_CATEGORIES = {"Groceries", "Cash Withdrawal"}
 
+BUCKET_DEFINITIONS: Dict[str, Dict[str, str]] = {
+    "Groceries": {"definition": "Supermarkets, food staples, and household basics.", "tag": "quasi-fixed", "controllability": "medium"},
+    "Eating Out": {"definition": "Restaurants, delivery, cafes, lunches, and social food.", "tag": "variable", "controllability": "high"},
+    "Holiday": {"definition": "Family travel: flights, hotels, car rental, parks, tickets, and travel activities.", "tag": "variable", "controllability": "high"},
+    "Shopping": {"definition": "Retail purchases such as clothing, electronics, marketplace orders, and general goods.", "tag": "variable", "controllability": "high"},
+    "Transportation": {"definition": "Car, fuel, parking, public transport, repairs, and mobility costs.", "tag": "mixed", "controllability": "medium"},
+    "Education": {"definition": "Kids activities, camps, lessons, school-related costs, and professional learning.", "tag": "mixed", "controllability": "medium"},
+    "Health": {"definition": "Health insurance, pharmacy, clinics, medical bills, dentists, and fitness.", "tag": "mixed", "controllability": "low"},
+    "Housing": {"definition": "Mortgage, utilities, telecom, recurring home contracts, and housing insurance.", "tag": "fixed", "controllability": "low"},
+    "Home and Furniture": {"definition": "Furniture, kitchen, DIY, appliances, repairs, and home improvement projects.", "tag": "variable", "controllability": "medium"},
+    "Pet Care": {"definition": "Vet, boarding, food, and other pet-related costs.", "tag": "variable", "controllability": "low"},
+    "Cash Withdrawal": {"definition": "ATM cash withdrawals; includes cleaning cash unless separately tagged.", "tag": "quasi-fixed", "controllability": "medium"},
+    "Taxes and Government": {"definition": "Municipal taxes, national tax payments, water authority, and government charges.", "tag": "fixed", "controllability": "low"},
+    "Subscriptions": {"definition": "Digital subscriptions, recurring services, and small account programs.", "tag": "fixed", "controllability": "medium"},
+    "Banking and Fees": {"definition": "Bank package costs, cards, account fees, and interest-like banking charges.", "tag": "fixed", "controllability": "low"},
+    "Unknown Card Spend": {"definition": "Aggregated credit-card settlement rows awaiting itemized card statements.", "tag": "unknown", "controllability": "unknown"},
+    "Business Expense": {"definition": "Company-backed spend that should be reimbursed or netted out of household burn.", "tag": "pass-through", "controllability": "none"},
+    "Other": {"definition": "Known spend that does not yet have a better durable bucket.", "tag": "variable", "controllability": "medium"},
+    "Inter-account Transfers": {"definition": "Money moving between your own accounts; not household burn.", "tag": "not-out", "controllability": "none"},
+    "Investments": {"definition": "Cash allocated to brokers, savings/investment accounts, and wealth-building flows.", "tag": "not-out", "controllability": "none"},
+}
+
 
 def money(value: float) -> float:
     return round(float(value or 0), 2)
@@ -94,8 +117,8 @@ def _period_years(period: str, snapshots: List[Dict[str, Any]]) -> List[str]:
 
 
 def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    conn.execute("DELETE FROM monthly_snapshots")
     months = aggregate_months(conn)
+    rows_to_insert = []
     for month, values in sorted(months.items()):
         real_income = values["real_income"]
         cashflow_burn = (
@@ -109,16 +132,7 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
         household_net_pnl = real_income - cashflow_burn
         savings_rate_cashflow = ((real_income - cashflow_burn) / real_income) if real_income else None
         savings_rate_fire = ((real_income - normalized_burn) / real_income) if real_income else None
-        conn.execute(
-            """
-            INSERT INTO monthly_snapshots (
-                month, real_income, regular_income, variable_income, household_outflow_gross,
-                household_spend_cashflow, household_spend_normalized, household_net_pnl,
-                mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
-                reimbursements_received, reimbursements_cleared, linked_reimbursements, refunds, net_cash_change,
-                savings_rate_cashflow, savings_rate_fire
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        rows_to_insert.append(
             (
                 month,
                 money(real_income),
@@ -138,10 +152,38 @@ def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]
                 money(values["net_cash_change"]),
                 savings_rate_cashflow,
                 savings_rate_fire,
-            ),
+            )
         )
-    conn.commit()
+    with conn:
+        conn.execute("DELETE FROM monthly_snapshots")
+        conn.executemany(
+            """
+            INSERT INTO monthly_snapshots (
+                month, real_income, regular_income, variable_income, household_outflow_gross,
+                household_spend_cashflow, household_spend_normalized, household_net_pnl,
+                mortgage_total, mortgage_principal_estimate, wealth_allocation, internal_transfers,
+                reimbursements_received, reimbursements_cleared, linked_reimbursements, refunds, net_cash_change,
+                savings_rate_cashflow, savings_rate_fire
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows_to_insert,
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('snapshots_built_at', CURRENT_TIMESTAMP)"
+        )
     return list_monthly_snapshots(conn)
+
+
+def ensure_snapshots_current(conn: sqlite3.Connection) -> bool:
+    snapshot_count = conn.execute("SELECT COUNT(*) AS count FROM monthly_snapshots").fetchone()["count"]
+    snapshot_row = conn.execute("SELECT value FROM schema_meta WHERE key = 'snapshots_built_at'").fetchone()
+    annotation_row = conn.execute("SELECT MAX(updated_at) AS classified_at FROM transaction_annotations").fetchone()
+    built_at = snapshot_row["value"] if snapshot_row else ""
+    classified_at = annotation_row["classified_at"] if annotation_row else ""
+    if snapshot_count == 0 or (classified_at and (not built_at or classified_at > built_at)):
+        recompute_monthly_snapshots(conn)
+        return True
+    return False
 
 
 def aggregate_months(conn: sqlite3.Connection) -> Dict[str, Dict[str, float]]:
@@ -504,6 +546,11 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0, period:
                 "investment_rate": None,
                 "fi_number": 0,
                 "runway_months": None,
+                "average_months": 0,
+                "excluded_partial_month": None,
+                "fixed_floor": 0,
+                "quasi_fixed_average": 0,
+                "variable_average": 0,
             },
             "data_health": data_health(conn),
         }
@@ -588,7 +635,7 @@ def fixed_variable_breakdown(conn: sqlite3.Connection, period: str = "last13") -
         amount = float(row["outflow"] or 0)
         if category in QUASI_FIXED_CATEGORIES:
             by_month[row["month"]]["quasi_fixed"] += amount
-        elif category == "Housing" or any(pattern in merchant for pattern in FIXED_MERCHANT_PATTERNS):
+        elif category == "Housing" or fixed_merchant_match(merchant):
             by_month[row["month"]]["fixed"] += amount
         else:
             by_month[row["month"]]["variable"] += amount
@@ -596,6 +643,17 @@ def fixed_variable_breakdown(conn: sqlite3.Connection, period: str = "last13") -
         {"month": month, **{key: money(value) for key, value in values.items()}}
         for month, values in sorted(by_month.items())
     ]
+
+
+def fixed_merchant_match(merchant: str) -> bool:
+    normalized = re.sub(r"\s+", " ", merchant.upper()).strip()
+    for pattern in FIXED_MERCHANT_PATTERNS:
+        if len(pattern) <= 3:
+            if re.search(rf"(?<![A-Z0-9]){re.escape(pattern)}(?![A-Z0-9])", normalized):
+                return True
+        elif normalized.startswith(pattern) or re.search(rf"(?<![A-Z0-9]){re.escape(pattern)}(?![A-Z0-9])", normalized):
+            return True
+    return False
 
 
 def period_bounds_from_snapshots(conn: sqlite3.Connection, period: str = "last13") -> Tuple[str, str]:

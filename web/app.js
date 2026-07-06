@@ -34,6 +34,7 @@ const state = {
   bucketChartMode: "month",
   bucketVisibility: { income: true, outflow: true },
   bucketFilters: [],
+  bucketDefinitions: new Map(),
   auditMonth: null,
   auditSort: "confidence",
   auditCategoryFilter: null,
@@ -227,8 +228,9 @@ function bucketTotalsLabel(row) {
   const category = row.category || "Uncategorized";
   if (category === "Unknown Card Spend") return "Card spend";
   if (category === "Home and Furniture") return "Home";
-  if (category === "Banking and Fees") return "Fees";
-  if (category === "ING monthly") return "Fees";
+  if (category === "Banking and Fees") return "Subscriptions";
+  if (category === "ING monthly") return "Subscriptions";
+  if (category === "Gas") return "Transportation";
   if (category === "Taxes and Government") return "Taxes";
   if (category === "Inter-account Transfers") return "Transfers";
   if (category === "Wealth Allocation") return "Investments";
@@ -299,7 +301,7 @@ function renderBurnChart(months) {
     chart.innerHTML = `<p class="empty">No imported data yet.</p>`;
     return;
   }
-  chart.classList.toggle("scroll-list", state.period === "all");
+  chart.classList.toggle("scroll-list", months.length > 13);
   const scaleReference = Math.max(
     percentile(months.flatMap((row) => [Number(row.regular_income || 0), Math.max(0, Number(row.household_spend_cashflow || 0))]), 0.9) * 1.2,
     1,
@@ -904,8 +906,10 @@ async function loadSpending() {
 async function loadBuckets() {
   const data = await api(`/api/dashboard/buckets?period=${periodQuery()}`);
   state.buckets = data;
+  state.bucketDefinitions = new Map((data.definitions || []).map((item) => [item.bucket, item]));
   renderBucketYearTotals(data.years || []);
   renderBucketMonthTotals(data.months || []);
+  renderBucketGuide(data.definitions || []);
   renderBucketChart();
 }
 
@@ -1502,7 +1506,12 @@ function renderBucketYearTotals(rows) {
     "bucket-years-table",
     [
       { key: "year", label: "Year" },
-      { key: "label", label: "Bucket", render: (row) => row.label },
+      {
+        key: "label",
+        label: "Bucket",
+        html: true,
+        render: (row) => bucketDrillButton(row.label, { year: row.year }, row.label),
+      },
       { key: "outflow", label: "Out", number: true, render: (row) => fmtPrecise(row.outflow) },
       { key: "count", label: "Rows", number: true },
       { key: "avg_confidence", label: "Conf.", number: true, render: (row) => fmtPercent(row.avg_confidence) },
@@ -1528,14 +1537,84 @@ function renderBucketMonthTotals(rows) {
         const total = months.reduce((sum, month) => sum + (lookup.get(`${bucket}|${month}`) || 0), 0);
         return `
           <div class="matrix-row bucket-row" style="--month-count:${months.length}">
-            <strong>${escapeHtml(bucket)}</strong>
-            ${months.map((month) => `<span>${lookup.get(`${bucket}|${month}`) ? fmtMoney(lookup.get(`${bucket}|${month}`)) : ""}</span>`).join("")}
-            <strong>${fmtMoney(total)}</strong>
+            <strong>${bucketDrillButton(bucket, {}, bucket)}</strong>
+            ${months
+              .map((month) => {
+                const value = lookup.get(`${bucket}|${month}`) || 0;
+                return `<span>${value ? bucketDrillButton(bucket, { month }, fmtMoney(value)) : ""}</span>`;
+              })
+              .join("")}
+            <strong>${bucketDrillButton(bucket, {}, fmtMoney(total))}</strong>
           </div>
         `;
       })
       .join("")}
   `;
+}
+
+function bucketDrillButton(bucket, scope, label) {
+  const definition = state.bucketDefinitions.get(bucket);
+  const title = definition?.definition || `View ${bucket} transactions`;
+  const attrs = [
+    `data-bucket-drilldown="${escapeHtml(bucket)}"`,
+    scope.month ? `data-drill-month="${escapeHtml(scope.month)}"` : "",
+    scope.year ? `data-drill-year="${escapeHtml(scope.year)}"` : "",
+    `title="${escapeHtml(title)}"`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `<button class="link-button bucket-drill-button" ${attrs}>${escapeHtml(label)}</button>`;
+}
+
+function renderBucketGuide(rows) {
+  renderTable(
+    "bucket-guide-table",
+    [
+      { key: "bucket", label: "Bucket" },
+      { key: "definition", label: "Definition" },
+      { key: "examples", label: "Examples", render: (row) => (row.examples || []).slice(0, 5).join(", ") },
+      { key: "tag", label: "Fixed/variable" },
+      { key: "controllability", label: "Control" },
+    ],
+    rows,
+  );
+}
+
+async function renderBucketDrilldown(button) {
+  const bucket = button.dataset.bucketDrilldown;
+  const params = new URLSearchParams();
+  params.set("category", bucket);
+  params.set("period", state.period);
+  if (button.dataset.drillMonth) params.set("month", button.dataset.drillMonth);
+  if (button.dataset.drillYear) params.set("year", button.dataset.drillYear);
+  const panel = document.getElementById("month-audit-panel");
+  const list = document.getElementById("month-audit-list");
+  state.auditMonth = button.dataset.drillMonth || null;
+  state.auditCategoryFilter = null;
+  state.auditRows = null;
+  document.getElementById("month-audit-title").textContent = `${bucket} Drilldown`;
+  panel.classList.remove("hidden");
+  setAuditStatus("Loading bucket transactions...");
+  list.innerHTML = `<p class="empty">Loading bucket transactions...</p>`;
+  try {
+    const data = await api(`/api/bucket-drilldown?${params.toString()}`);
+    const rows = data.rows || [];
+    state.auditRows = rows;
+    const netTotal = rows.reduce((sum, row) => sum + Number(row.net_outflow || Math.abs(Number(row.amount || 0))), 0);
+    list.innerHTML = `
+      <div class="audit-summary">
+        ${signal("Bucket", bucket, button.dataset.drillMonth || button.dataset.drillYear || state.period)}
+        ${signal("Rows", String(rows.length), "Transactions in this drilldown")}
+        ${signal("Total", fmtPrecise(netTotal), "Gross outflow")}
+      </div>
+      <div class="audit-category-strip"></div>
+    `;
+    renderAuditTransactions(rows);
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    setAuditStatus(error.message, "error");
+    list.innerHTML = `<p class="empty">Could not load bucket transactions.</p>`;
+  }
 }
 
 async function loadTransactions() {
@@ -1898,6 +1977,7 @@ document.addEventListener("click", (event) => {
   const incomeSortButton = target.closest(".sort-income-button");
   const categoryFilterButton = target.closest(".category-filter-btn");
   const bucketFilterButton = target.closest("[data-bucket-filter]");
+  const bucketDrilldownButton = target.closest("[data-bucket-drilldown]");
   const bucketModeButton = target.closest("[data-bucket-mode]");
   const bucketSeriesButton = target.closest("[data-bucket-series]");
   const auditActionButton = target.closest("[data-audit-action]");
@@ -1940,6 +2020,10 @@ document.addEventListener("click", (event) => {
   if (bucketFilterButton) {
     event.preventDefault();
     handleBucketFilterClick(bucketFilterButton);
+  }
+  if (bucketDrilldownButton) {
+    event.preventDefault();
+    renderBucketDrilldown(bucketDrilldownButton);
   }
   if (bucketModeButton) {
     event.preventDefault();

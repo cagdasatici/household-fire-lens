@@ -16,7 +16,9 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from .aggregation import (
+    BUCKET_DEFINITIONS,
     assert_monthly_pnl_identity,
+    ensure_snapshots_current,
     fire_snapshot,
     filter_snapshots_for_period,
     list_amortization_rules,
@@ -161,37 +163,48 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         elif path == "/api/dashboard/fire":
             fire_multiple = float((query.get("multiple") or ["25"])[0])
             period = (query.get("period") or ["last13"])[0]
+            ensure_snapshots_current(self.conn)
             self.send_json(fire_snapshot(self.conn, fire_multiple, period))
         elif path == "/api/dashboard/monthly-flow":
             period = (query.get("period") or ["last13"])[0]
+            ensure_snapshots_current(self.conn)
             months = fetch_all(self.conn, "SELECT * FROM monthly_snapshots ORDER BY month")
             assert_monthly_pnl_identity(months)
             self.send_json({"months": filter_snapshots_for_period(months, period)})
         elif path == "/api/dashboard/spending":
             period = (query.get("period") or ["last13"])[0]
+            ensure_snapshots_current(self.conn)
             self.send_json(spending_breakdown(self.conn, period))
         elif path == "/api/dashboard/buckets":
             period = (query.get("period") or ["last13"])[0]
+            ensure_snapshots_current(self.conn)
             self.send_json(self.bucket_totals(period))
         elif path == "/api/month-audit":
             month = (query.get("month") or [""])[0]
             sort = (query.get("sort") or ["confidence"])[0]
-            self.send_json({"month": month, "rows": self.month_audit(month, sort)})
+            category = (query.get("category") or [""])[0]
+            self.send_json({"month": month, "rows": self.month_audit(month, sort, category)})
         elif path == "/api/month-income":
             month = (query.get("month") or [""])[0]
             sort = (query.get("sort") or ["amount"])[0]
             self.send_json({"month": month, "rows": self.month_income(month, sort)})
+        elif path == "/api/bucket-drilldown":
+            self.send_json({"rows": self.bucket_drilldown(query)})
         elif path == "/api/dashboard/optimization":
             period = (query.get("period") or ["last13"])[0]
+            ensure_snapshots_current(self.conn)
             self.send_json(optimization_insights(self.conn, period))
         elif path == "/api/dashboard/insights":
             period = (query.get("period") or ["all"])[0]
+            ensure_snapshots_current(self.conn)
             self.send_json({**spending_insights(self.conn, period), "story": spending_story(self.conn)})
         elif path == "/api/recurring":
             self.send_json({"recurring": recurring_merchants(self.conn)})
         elif path == "/api/amortization-rules":
+            ensure_snapshots_current(self.conn)
             self.send_json({"amortization_rules": list_amortization_rules(self.conn)})
         elif path == "/api/data-health":
+            ensure_snapshots_current(self.conn)
             self.send_json(fire_snapshot(self.conn)["data_health"])
         elif path == "/api/rules":
             self.send_json({"rules": fetch_all(self.conn, "SELECT * FROM classification_rules ORDER BY priority, id")})
@@ -475,9 +488,10 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             tuple(params),
         )
 
-    def month_audit(self, month: str, sort: str = "confidence") -> Any:
+    def month_audit(self, month: str, sort: str = "confidence", category: str = "") -> Any:
         if not month or len(month) != 7:
             return []
+        category_filter, category_params = self.bucket_category_filter(category)
         order_by = {
             "confidence": "ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date, nt.id",
             "amount": "ABS(nt.amount) DESC, ta.confidence ASC, nt.transaction_date, nt.id",
@@ -501,10 +515,11 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
               AND substr(nt.transaction_date, 1, 7) = ?
               AND nt.amount < 0
               AND ta.economic_class IN ('household_spend', 'debt_service')
+              {category_filter}
             GROUP BY nt.id
             ORDER BY {order_by}
             """,
-            (month,),
+            (month, *category_params),
         )
         for row in rows:
             gross = abs(float(row["amount"] or 0))
@@ -687,7 +702,135 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             """,
             (start_month, end_month),
         )
-        return {"months": month_rows, "years": year_rows}
+        return {"months": month_rows, "years": year_rows, "definitions": self.bucket_definitions(period)}
+
+    def bucket_category_filter(self, bucket: str) -> tuple[str, list[str]]:
+        if not bucket:
+            return "", []
+        category_map = {
+            "Subscriptions": ["Subscriptions", "Banking and Fees", "ING monthly"],
+            "Transportation": ["Transportation", "Gas"],
+            "Home": ["Home and Furniture"],
+            "Card spend": ["Unknown Card Spend"],
+            "Transfers": ["Inter-account Transfers"],
+            "Investments": ["Wealth Allocation", "Investments"],
+        }
+        categories = category_map.get(bucket, [bucket])
+        placeholders = ", ".join("?" for _ in categories)
+        return f"AND COALESCE(ta.category, 'Uncategorized') IN ({placeholders})", categories
+
+    def bucket_definitions(self, period: str) -> list[dict[str, Any]]:
+        start_month, end_month = self.period_bounds(period)
+        rows = fetch_all(
+            self.conn,
+            """
+            SELECT
+                COALESCE(ta.category, 'Uncategorized') AS category,
+                COALESCE(NULLIF(nt.normalized_merchant, ''), COALESCE(nt.counterparty_name, 'Unknown')) AS merchant,
+                SUM(ABS(nt.amount)) AS amount
+            FROM normalized_transactions nt
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE nt.is_duplicate = 0
+              AND nt.amount < 0
+              AND ta.economic_class IN ('household_spend', 'debt_service')
+              AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
+            GROUP BY category, merchant
+            ORDER BY category, amount DESC
+            """,
+            (start_month, end_month),
+        )
+        examples: dict[str, list[str]] = {}
+        for row in rows:
+            label = self.bucket_label(row["category"])
+            examples.setdefault(label, [])
+            if len(examples[label]) < 5:
+                examples[label].append(row["merchant"])
+        labels = sorted(set(BUCKET_DEFINITIONS) | set(examples))
+        return [
+            {
+                "bucket": label,
+                **BUCKET_DEFINITIONS.get(
+                    label,
+                    {
+                        "definition": "Custom bucket created from your transaction history.",
+                        "tag": "variable",
+                        "controllability": "medium",
+                    },
+                ),
+                "examples": examples.get(label, []),
+            }
+            for label in labels
+        ]
+
+    def bucket_label(self, category: str) -> str:
+        if category == "Unknown Card Spend":
+            return "Card spend"
+        if category == "Home and Furniture":
+            return "Home"
+        if category in {"Banking and Fees", "ING monthly"}:
+            return "Subscriptions"
+        if category == "Gas":
+            return "Transportation"
+        if category == "Taxes and Government":
+            return "Taxes"
+        if category == "Inter-account Transfers":
+            return "Transfers"
+        if category in {"Wealth Allocation", "Investments"}:
+            return "Investments"
+        return category or "Uncategorized"
+
+    def period_bounds(self, period: str) -> tuple[str, str]:
+        from .aggregation import period_bounds_from_snapshots
+
+        return period_bounds_from_snapshots(self.conn, period)
+
+    def bucket_drilldown(self, query: Dict[str, Any]) -> Any:
+        period = (query.get("period") or ["last13"])[0]
+        bucket = (query.get("category") or query.get("bucket") or [""])[0]
+        month = (query.get("month") or [""])[0]
+        year = (query.get("year") or [""])[0]
+        sort = (query.get("sort") or ["amount"])[0]
+        order_by = {
+            "confidence": "ta.confidence ASC, ABS(nt.amount) DESC, nt.transaction_date DESC, nt.id",
+            "amount": "ABS(nt.amount) DESC, ta.confidence ASC, nt.transaction_date DESC, nt.id",
+            "date": "nt.transaction_date DESC, ABS(nt.amount) DESC, ta.confidence ASC, nt.id",
+        }.get(sort, "ABS(nt.amount) DESC, ta.confidence ASC, nt.transaction_date DESC, nt.id")
+        category_filter, category_params = self.bucket_category_filter(bucket)
+        clauses = ["nt.is_duplicate = 0", "nt.amount < 0", "ta.economic_class IN ('household_spend', 'debt_service')"]
+        params: list[Any] = []
+        if month:
+            clauses.append("substr(nt.transaction_date, 1, 7) = ?")
+            params.append(month)
+        elif year:
+            clauses.append("substr(nt.transaction_date, 1, 4) = ?")
+            params.append(year)
+        else:
+            start_month, end_month = self.period_bounds(period)
+            clauses.append("substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?")
+            params.extend([start_month, end_month])
+        if category_filter:
+            clauses.append(category_filter.removeprefix("AND "))
+            params.extend(category_params)
+        return fetch_all(
+            self.conn,
+            f"""
+            SELECT
+                nt.id, nt.transaction_date, nt.amount, nt.currency, nt.normalized_merchant,
+                nt.counterparty_name, nt.description,
+                a.display_name AS account_name,
+                ta.economic_class, ta.category, ta.subcategory, ta.confidence, ta.review_status, ta.explanation,
+                0 AS linked_reimbursement,
+                ABS(nt.amount) AS net_outflow,
+                'open' AS link_state
+            FROM normalized_transactions nt
+            JOIN accounts a ON a.id = nt.account_id
+            JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY {order_by}
+            LIMIT 500
+            """,
+            tuple(params),
+        )
 
     def link_transaction_to_best_inflow(self, tx_id: int) -> bool:
         outflow = self.conn.execute(
@@ -916,6 +1059,8 @@ def main() -> None:
             )
             raise SystemExit(98) from exc
         raise
+    server.conn = connect_database(get_database_path())  # type: ignore[attr-defined]
+    ensure_snapshots_current(server.conn)  # type: ignore[attr-defined]
     write_pidfile()
     print(f"Household FIRE Lens running at http://{host}:{port}")
     print(f"Database: {get_database_path()}")
