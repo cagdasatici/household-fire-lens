@@ -26,6 +26,7 @@ from .aggregation import (
     spending_breakdown,
     spending_insights,
     spending_story,
+    suggest_amortization_rules,
 )
 from .classifier import classify_all, create_rule_from_review, review_group_key
 from .database import connect_database, fetch_all, fetch_one, json_dumps, json_loads
@@ -160,11 +161,10 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         elif path == "/api/dashboard/fire":
             fire_multiple = float((query.get("multiple") or ["25"])[0])
             period = (query.get("period") or ["last13"])[0]
-            recompute_monthly_snapshots(self.conn)
             self.send_json(fire_snapshot(self.conn, fire_multiple, period))
         elif path == "/api/dashboard/monthly-flow":
             period = (query.get("period") or ["last13"])[0]
-            months = recompute_monthly_snapshots(self.conn)
+            months = fetch_all(self.conn, "SELECT * FROM monthly_snapshots ORDER BY month")
             assert_monthly_pnl_identity(months)
             self.send_json({"months": filter_snapshots_for_period(months, period)})
         elif path == "/api/dashboard/spending":
@@ -183,7 +183,6 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             self.send_json({"month": month, "rows": self.month_income(month, sort)})
         elif path == "/api/dashboard/optimization":
             period = (query.get("period") or ["last13"])[0]
-            recompute_monthly_snapshots(self.conn)
             self.send_json(optimization_insights(self.conn, period))
         elif path == "/api/dashboard/insights":
             period = (query.get("period") or ["all"])[0]
@@ -191,7 +190,6 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         elif path == "/api/recurring":
             self.send_json({"recurring": recurring_merchants(self.conn)})
         elif path == "/api/amortization-rules":
-            recompute_monthly_snapshots(self.conn)
             self.send_json({"amortization_rules": list_amortization_rules(self.conn)})
         elif path == "/api/data-health":
             self.send_json(fire_snapshot(self.conn)["data_health"])
@@ -240,6 +238,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         account_hint = form.getfirst("account_hint") or ""
         result = import_csv(self.conn, filename, content, institution, account_role, account_hint)
         classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json(result)
 
@@ -275,6 +274,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         self.conn.commit()
         if reclassify_after:
             classify_all(self.conn)
+            suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"account": fetch_one(self.conn, "SELECT * FROM accounts WHERE id = ?", (account_id,))})
 
@@ -336,6 +336,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         )
         self.conn.commit()
         classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"resolved": True, "rule_id": rule_id, "mapping_stored": mapping_stored})
 
@@ -366,6 +367,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         )
         self.conn.commit()
         classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"rule_id": cursor.lastrowid})
 
@@ -390,6 +392,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         self.conn.execute(f"UPDATE classification_rules SET {', '.join(updates)} WHERE id = ?", params)
         self.conn.commit()
         classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"rule": fetch_one(self.conn, "SELECT * FROM classification_rules WHERE id = ?", (rule_id,))})
 
@@ -411,6 +414,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
 
     def handle_reclassify(self) -> None:
         counts = classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"classified": counts})
 
@@ -419,6 +423,7 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
         limit = max(1, min(int(body.get("limit", 10)), 25))
         summary = enrich_candidate_merchants(self.conn, limit=limit)
         counts = classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         self.send_json({"enrichment": summary, "classified": counts})
 

@@ -93,6 +93,16 @@
             <strong id="investment-rate">n/a</strong>
             <small id="runway-months">Runway n/a</small>
           </article>
+          <article class="metric">
+            <span>Fixed floor</span>
+            <strong id="fixed-floor">EUR 0</strong>
+            <small>Contracted monthly baseline</small>
+          </article>
+          <article class="metric">
+            <span>Variable avg</span>
+            <strong id="variable-average">EUR 0</strong>
+            <small id="baseline-detail">Rest of household burn</small>
+          </article>
         </div>
         <div class="split-grid">
           <div class="panel">
@@ -124,8 +134,8 @@
             <h3 id="month-audit-title">Month Audit</h3>
             <span>Outflow decomposition, linked reimbursements, and one-click fixes</span>
           </div>
-          <div class="toolbar compact-toolbar" style="margin: 12px 0;">
-            <span style="font-size: 0.85em; color: var(--text-secondary);">Sort by:</span>
+          <div class="toolbar compact-toolbar">
+            <span class="sort-label">Sort by:</span>
             <button id="sort-confidence" class="sort-button active" data-sort="confidence">Confidence</button>
             <button id="sort-amount" class="sort-button" data-sort="amount">Amount</button>
             <button id="sort-date" class="sort-button" data-sort="date">Date</button>
@@ -139,8 +149,8 @@
             <h3 id="month-income-title">Month Income</h3>
             <span>Income sources and composition</span>
           </div>
-          <div class="toolbar compact-toolbar" style="margin: 12px 0;">
-            <span style="font-size: 0.85em; color: var(--text-secondary);">Sort by:</span>
+          <div class="toolbar compact-toolbar">
+            <span class="sort-label">Sort by:</span>
             <button class="sort-income-button active" data-sort="amount">Amount</button>
             <button class="sort-income-button" data-sort="confidence">Confidence</button>
             <button class="sort-income-button" data-sort="date">Date</button>

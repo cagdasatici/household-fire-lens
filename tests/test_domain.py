@@ -9,6 +9,7 @@ from household_fire_lens.aggregation import (
     recompute_monthly_snapshots,
     spending_insights,
     spending_story,
+    suggest_amortization_rules,
 )
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
@@ -325,7 +326,7 @@ class DomainTests(unittest.TestCase):
 
     def test_amortization_replaces_lumpy_cashflow_when_approved(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
-2026-01-04,Main,Annual insurance premium,Allianz Insurance,-1200.00,EUR
+2026-01-04,Main,DE RUIJTER MEUBEL home project,DE RUIJTER MEUBEL,-1800.00,EUR
 """
         import_csv(
             self.conn,
@@ -335,18 +336,35 @@ class DomainTests(unittest.TestCase):
             account_role="checking",
         )
         classify_all(self.conn)
+        suggest_amortization_rules(self.conn)
         recompute_monthly_snapshots(self.conn)
         rule = self.conn.execute("SELECT * FROM amortization_rules WHERE review_status = 'suggested'").fetchone()
         self.assertIsNotNone(rule)
         january = self.conn.execute("SELECT * FROM monthly_snapshots WHERE month = '2026-01'").fetchone()
-        self.assertEqual(january["household_spend_normalized"], 1200.0)
+        self.assertEqual(january["household_spend_normalized"], 1800.0)
 
         self.conn.execute("UPDATE amortization_rules SET review_status = 'approved' WHERE id = ?", (rule["id"],))
         self.conn.commit()
         recompute_monthly_snapshots(self.conn)
         january = self.conn.execute("SELECT * FROM monthly_snapshots WHERE month = '2026-01'").fetchone()
-        self.assertEqual(january["household_spend_cashflow"], 1200.0)
-        self.assertEqual(january["household_spend_normalized"], 100.0)
+        self.assertEqual(january["household_spend_cashflow"], 1800.0)
+        self.assertEqual(january["household_spend_normalized"], 150.0)
+
+    def test_recompute_does_not_create_amortization_suggestions_on_read(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-01-04,Main,Annual insurance premium,Allianz Insurance,-1800.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-readonly-amortization.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        count = self.conn.execute("SELECT COUNT(*) AS count FROM amortization_rules").fetchone()["count"]
+        self.assertEqual(count, 0)
 
     def test_optimization_insights_surface_controllable_categories(self):
         self.import_and_classify()
@@ -407,12 +425,31 @@ class DomainTests(unittest.TestCase):
         self.assertEqual([row["month"] for row in snapshot["months"]], ["2024-01", "2025-01", "2026-01"])
         self.assertEqual(len(snapshot["years"]), 3)
 
-    def test_spending_insights_cover_all_adjacent_year_pairs(self):
+    def test_fire_snapshot_excludes_current_partial_month_from_burn_average(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
-2023-05-01,Main,Hotel booking,Booking.com,-300.00,EUR
-2024-05-01,Main,Hotel booking,Booking.com,-800.00,EUR
-2025-05-01,Main,Hotel booking,Booking.com,-1200.00,EUR
+2026-06-01,Main,Hotel booking,Booking.com,-1200.00,EUR
+2026-07-01,Main,Hotel booking,Booking.com,-100.00,EUR
 """
+        import_csv(
+            self.conn,
+            "synthetic-partial-current-month.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        snapshot = fire_snapshot(self.conn, period="year:2026")
+        self.assertEqual(snapshot["summary"]["monthly_burn"], 1200.0)
+        self.assertEqual(snapshot["summary"]["average_months"], 1)
+        self.assertEqual(snapshot["summary"]["excluded_partial_month"], "2026-07")
+
+    def test_spending_insights_cover_all_adjacent_year_pairs(self):
+        rows = ["Date,Account,Description,Counterparty,Amount,Currency"]
+        for year, amount in ((2023, -300.0), (2024, -800.0), (2025, -1200.0)):
+            for month in range(1, 13):
+                rows.append(f"{year}-{month:02d}-01,Main,Hotel booking,Booking.com,{amount:.2f},EUR")
+        csv_text = "\n".join(rows) + "\n"
         import_csv(
             self.conn,
             "synthetic-spending-insights.csv",
@@ -429,6 +466,25 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(latest["items"][0]["category"], "Holiday")
         self.assertEqual(latest["items"][0]["prior_year"], "2024")
         self.assertEqual(latest["items"][0]["current_year"], "2025")
+
+    def test_spending_insights_marks_partial_years_without_yoy_takeaway(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2025-01-01,Main,Hotel booking,Booking.com,-300.00,EUR
+2025-02-01,Main,Hotel booking,Booking.com,-300.00,EUR
+2026-01-01,Main,Hotel booking,Booking.com,-1200.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-spending-partial-year.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        insights = spending_insights(self.conn)
+        self.assertTrue(insights["yearly_totals"]["2026"]["is_partial"])
+        self.assertEqual(insights["yearly_totals"]["2026"]["months"], 1)
+        self.assertEqual(insights["key_takeaways"], [])
 
     def test_spending_story_surfaces_major_lumpy_events(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency
@@ -482,6 +538,34 @@ class DomainTests(unittest.TestCase):
         }
         self.assertIn("Holiday", categories)
         self.assertIn("Other", categories)
+
+    def test_spending_analysis_merchant_hygiene_rules(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2026-05-01,Main,VUELING AIRLINE TICKET,Vueling,-250.00,EUR
+2026-05-02,Main,TWISTER AMSTELVEEN lunch,Twister Amstelveen,-18.50,EUR
+2026-05-03,Main,WOOLSOCKS AG AMAZON PURCHASE,Woolsocks AG,-72.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-spending-analysis-hygiene.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        rows = {
+            row["normalized_merchant"]: row["category"]
+            for row in self.conn.execute(
+                """
+                SELECT nt.normalized_merchant, ta.category
+                FROM normalized_transactions nt
+                JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+                """
+            ).fetchall()
+        }
+        self.assertEqual(rows["VUELING"], "Holiday")
+        self.assertEqual(rows["TWISTER AMSTELVEEN"], "Eating Out")
+        self.assertEqual(rows["WOOLSOCKS AG"], "Shopping")
 
     def test_cash_withdrawal_terminal_and_processor_descriptions_are_not_review(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

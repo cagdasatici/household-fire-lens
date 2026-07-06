@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
+from datetime import date
 from typing import Any, Dict, Iterable, List, Tuple
 
 
@@ -27,6 +28,26 @@ CONTROLLABILITY = {
     "Unknown Card Spend": 0.7,
     "Uncategorized": 0.55,
 }
+
+FIXED_MERCHANT_PATTERNS = (
+    "ABN AMRO BANK",
+    "BELASTINGDIENST",
+    "CZ",
+    "DAK VOLMACHT",
+    "ETECK",
+    "FRANK ENERGIE",
+    "GEMEENTE AMSTELVEEN",
+    "KPN",
+    "NN ZORG",
+    "PWN",
+    "RISK VERZEKERINGEN",
+    "SPORTCITY",
+    "TAF BV",
+    "WATERSCHAP",
+    "ZORG EN ZEKERHEID",
+)
+
+QUASI_FIXED_CATEGORIES = {"Groceries", "Cash Withdrawal"}
 
 
 def money(value: float) -> float:
@@ -74,7 +95,6 @@ def _period_years(period: str, snapshots: List[Dict[str, Any]]) -> List[str]:
 
 def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     conn.execute("DELETE FROM monthly_snapshots")
-    suggest_amortization_rules(conn)
     months = aggregate_months(conn)
     for month, values in sorted(months.items()):
         real_income = values["real_income"]
@@ -311,6 +331,19 @@ def suggest_amortization_rules(conn: sqlite3.Connection) -> None:
     Suggestions are intentionally conservative. They never affect metrics until approved.
     """
 
+    conn.execute(
+        """
+        UPDATE amortization_rules
+        SET review_status = 'disabled'
+        WHERE review_status = 'suggested'
+          AND (
+            LOWER(COALESCE(name, '')) LIKE '%mortgage%'
+            OR LOWER(COALESCE(merchant_pattern, '')) LIKE '%mortgage%'
+            OR category IN ('Housing', 'Banking and Fees')
+            OR annual_amount < 1500
+          )
+        """
+    )
     existing_rows = conn.execute(
         "SELECT transaction_id FROM amortization_rules WHERE transaction_id IS NOT NULL"
     ).fetchall()
@@ -329,9 +362,10 @@ def suggest_amortization_rules(conn: sqlite3.Connection) -> None:
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
           AND nt.amount < 0
-          AND ABS(nt.amount) >= 600
+          AND ABS(nt.amount) >= 1500
           AND ta.economic_class = 'household_spend'
           AND ta.category NOT IN ('Unknown Card Spend', 'Uncategorized')
+          AND ta.category NOT IN ('Housing', 'Banking and Fees')
         ORDER BY ABS(nt.amount) DESC
         """
     ).fetchall()
@@ -339,6 +373,8 @@ def suggest_amortization_rules(conn: sqlite3.Connection) -> None:
         if row["id"] in existing:
             continue
         merchant = row["normalized_merchant"] or row["category"] or "Annual expense"
+        if recurring_monthly_merchant(conn, merchant, row["id"]):
+            continue
         category = row["category"] or "Uncategorized"
         annual_amount = abs(float(row["amount"]))
         start_month = str(row["transaction_date"])[:7]
@@ -360,6 +396,27 @@ def suggest_amortization_rules(conn: sqlite3.Connection) -> None:
                 month_add(start_month, 11),
             ),
         )
+    conn.commit()
+
+
+def recurring_monthly_merchant(conn: sqlite3.Connection, merchant: str, transaction_id: int) -> bool:
+    if not merchant:
+        return False
+    rows = conn.execute(
+        """
+        SELECT DISTINCT substr(nt.transaction_date, 1, 7) AS month
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.id != ?
+          AND nt.normalized_merchant = ?
+          AND nt.amount < 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+        ORDER BY month
+        """,
+        (transaction_id, merchant),
+    ).fetchall()
+    return len(rows) >= 3
 
 
 def list_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -450,11 +507,11 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0, period:
             },
             "data_health": data_health(conn),
         }
-    recent = snapshots
-    count = len(recent)
-    income = sum(float(row["real_income"]) for row in recent)
-    normalized = sum(float(row["household_spend_normalized"]) for row in recent)
-    wealth = sum(float(row["wealth_allocation"]) for row in recent)
+    average_snapshots = complete_average_months(snapshots)
+    count = len(average_snapshots)
+    income = sum(float(row["real_income"]) for row in average_snapshots)
+    normalized = sum(float(row["household_spend_normalized"]) for row in average_snapshots)
+    wealth = sum(float(row["wealth_allocation"]) for row in average_snapshots)
     monthly_burn = normalized / count if count else 0
     annualized_burn = monthly_burn * 12
     savings_rate = ((income - normalized) / income) if income else None
@@ -475,9 +532,70 @@ def fire_snapshot(conn: sqlite3.Connection, fire_multiple: float = 25.0, period:
             "fi_number": money(annualized_burn * fire_multiple),
             "fire_multiple": fire_multiple,
             "runway_months": money(wealth / monthly_burn) if monthly_burn else None,
+            "average_months": count,
+            "excluded_partial_month": snapshots[-1]["month"] if snapshots and snapshots[-1] not in average_snapshots else None,
+            **fixed_variable_summary(conn, period),
         },
         "data_health": data_health(conn),
     }
+
+
+def complete_average_months(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(snapshots) <= 1:
+        return snapshots
+    current_month = date.today().strftime("%Y-%m")
+    if snapshots[-1]["month"] == current_month:
+        return snapshots[:-1]
+    return snapshots
+
+
+def fixed_variable_summary(conn: sqlite3.Connection, period: str = "last13") -> Dict[str, Any]:
+    rows = fixed_variable_breakdown(conn, period)
+    if not rows:
+        return {"fixed_floor": 0, "quasi_fixed_average": 0, "variable_average": 0}
+    count = len(rows)
+    return {
+        "fixed_floor": money(sum(row["fixed"] for row in rows) / count),
+        "quasi_fixed_average": money(sum(row["quasi_fixed"] for row in rows) / count),
+        "variable_average": money(sum(row["variable"] for row in rows) / count),
+    }
+
+
+def fixed_variable_breakdown(conn: sqlite3.Connection, period: str = "last13") -> List[Dict[str, Any]]:
+    start_month, end_month = period_bounds_from_snapshots(conn, period)
+    rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 7) AS month,
+            COALESCE(nt.normalized_merchant, nt.counterparty_name, '') AS merchant,
+            COALESCE(ta.category, 'Uncategorized') AS category,
+            SUM(ABS(nt.amount)) AS outflow
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND nt.amount < 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
+        GROUP BY month, merchant, category
+        ORDER BY month
+        """,
+        (start_month, end_month),
+    ).fetchall()
+    by_month: Dict[str, Dict[str, float]] = defaultdict(lambda: {"fixed": 0.0, "quasi_fixed": 0.0, "variable": 0.0})
+    for row in rows:
+        merchant = str(row["merchant"] or "").upper()
+        category = row["category"] or ""
+        amount = float(row["outflow"] or 0)
+        if category in QUASI_FIXED_CATEGORIES:
+            by_month[row["month"]]["quasi_fixed"] += amount
+        elif category == "Housing" or any(pattern in merchant for pattern in FIXED_MERCHANT_PATTERNS):
+            by_month[row["month"]]["fixed"] += amount
+        else:
+            by_month[row["month"]]["variable"] += amount
+    return [
+        {"month": month, **{key: money(value) for key, value in values.items()}}
+        for month, values in sorted(by_month.items())
+    ]
 
 
 def period_bounds_from_snapshots(conn: sqlite3.Connection, period: str = "last13") -> Tuple[str, str]:
@@ -709,10 +827,21 @@ def spending_insights(conn: sqlite3.Connection, period: str = "all") -> Dict[str
         ORDER BY year, category
         """
     , (start_month, end_month)).fetchall()
-    from datetime import datetime, timedelta
-    today = datetime.now()
-    current_year = today.strftime("%Y")
-    current_month = today.strftime("%m")
+    month_rows = conn.execute(
+        """
+        SELECT
+            substr(nt.transaction_date, 1, 4) AS year,
+            COUNT(DISTINCT substr(nt.transaction_date, 1, 7)) AS months
+        FROM normalized_transactions nt
+        JOIN transaction_annotations ta ON ta.transaction_id = nt.id
+        WHERE nt.is_duplicate = 0
+          AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
+        GROUP BY year
+        """,
+        (start_month, end_month),
+    ).fetchall()
+    months_by_year = {row["year"]: int(row["months"] or 0) for row in month_rows}
 
     by_year_category: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
     for row in rows:
@@ -730,7 +859,13 @@ def spending_insights(conn: sqlite3.Connection, period: str = "all") -> Dict[str
 
     for year in sorted(by_year_category.keys()):
         yearly_total = sum(by_year_category[year].values())
-        comparison["yearly_totals"][year] = {"total": money(yearly_total), "months": int(year) == int(current_year) and int(current_month) or 12}
+        months = months_by_year.get(year, 0)
+        comparison["yearly_totals"][year] = {
+            "total": money(yearly_total),
+            "months": months,
+            "monthly_average": money(yearly_total / months) if months else 0,
+            "is_partial": months < 12,
+        }
 
     for category in sorted(all_categories):
         cat_data = {
@@ -744,6 +879,8 @@ def spending_insights(conn: sqlite3.Connection, period: str = "all") -> Dict[str
 
     years = sorted(by_year_category.keys())
     for prior_year, current_year_key in zip(years, years[1:]):
+        if months_by_year.get(prior_year, 0) < 12 or months_by_year.get(current_year_key, 0) < 12:
+            continue
         changes = []
         for category in all_categories:
             prior_amount = by_year_category[prior_year].get(category, 0.0)

@@ -147,6 +147,11 @@ async function loadFire() {
   setText("investment-rate", fmtPercent(summary.investment_rate));
   setText("fi-multiple-label", `${summary.fire_multiple || multiple}x annual burn`);
   setText("runway-months", summary.runway_months ? `Runway ${Math.round(summary.runway_months)} months` : "Runway n/a");
+  setText("fixed-floor", fmtMoney(summary.fixed_floor || 0));
+  setText("variable-average", fmtMoney(summary.variable_average || 0));
+  const averageMonths = summary.average_months || (data.months || []).length;
+  const excluded = summary.excluded_partial_month ? `; excluded ${summary.excluded_partial_month}` : "";
+  setText("baseline-detail", `Quasi-fixed ${fmtMoney(summary.quasi_fixed_average || 0)} · ${averageMonths} mo avg${excluded}`);
   renderPeriodOptions(data.available_years || []);
   renderBurnChart(data.months || []);
   renderYearlyTable(data.years || []);
@@ -593,8 +598,7 @@ function updateSortButtonStates() {
   });
 }
 
-async function handleSortClick(event) {
-  const button = event.target;
+async function handleSortClick(button) {
   if (!button.classList.contains("sort-button")) return;
   state.auditSort = button.dataset.sort;
   updateSortButtonStates();
@@ -628,8 +632,7 @@ function updateIncomeSortButtonStates() {
   });
 }
 
-async function handleIncomeSortClick(event) {
-  const button = event.target;
+async function handleIncomeSortClick(button) {
   if (!button.classList.contains("sort-income-button")) return;
   state.incomeSort = button.dataset.sort;
   updateIncomeSortButtonStates();
@@ -1019,7 +1022,8 @@ function renderInsights(data) {
   `;
 
   for (const [year, yearData] of Object.entries(data.yearly_totals || {})) {
-    html += `<div class="insight-metric"><span>${year}</span><strong>${yearData.total}</strong></div>`;
+    const suffix = yearData.is_partial ? " partial" : "";
+    html += `<div class="insight-metric"><span>${year}${suffix} · ${yearData.months || 0} mo</span><strong>${fmtMoney(yearData.total)}</strong><small>${fmtMoney(yearData.monthly_average || 0)}/mo</small></div>`;
   }
 
   html += `</div></div>`;
@@ -1919,11 +1923,11 @@ document.addEventListener("click", (event) => {
   }
   if (sortButton) {
     event.preventDefault();
-    handleSortClick(event);
+    handleSortClick(sortButton);
   }
   if (incomeSortButton) {
     event.preventDefault();
-    handleIncomeSortClick(event);
+    handleIncomeSortClick(incomeSortButton);
   }
   if (categoryFilterButton && !target.closest("#month-income-panel")) {
     event.preventDefault();
