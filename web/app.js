@@ -24,7 +24,26 @@ const accountRoles = [
   "broker_proxy",
   "unknown",
 ];
-const state = { spending: null, fire: null, optimization: null, period: "last13", auditMonth: null, auditSort: "confidence", auditCategoryFilter: null, auditBusy: false, auditRows: null, incomeMonth: null, incomeSort: "amount", incomeCategoryFilter: null, incomeRows: null };
+const state = {
+  spending: null,
+  fire: null,
+  optimization: null,
+  flow: null,
+  buckets: null,
+  period: "year:2026",
+  bucketChartMode: "month",
+  bucketVisibility: { income: true, outflow: true },
+  bucketFilters: [],
+  auditMonth: null,
+  auditSort: "confidence",
+  auditCategoryFilter: null,
+  auditBusy: false,
+  auditRows: null,
+  incomeMonth: null,
+  incomeSort: "amount",
+  incomeCategoryFilter: null,
+  incomeRows: null,
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -107,7 +126,11 @@ function renderTable(id, columns, rows) {
 
 function periodQuery() {
   const selector = document.getElementById("period-selector");
-  state.period = selector ? selector.value : state.period || "last13";
+  if (selector && selector.dataset.loadedYears) {
+    state.period = selector.value;
+  } else if (!state.period) {
+    state.period = "year:2026";
+  }
   return encodeURIComponent(state.period);
 }
 
@@ -134,14 +157,34 @@ async function loadFire() {
 function renderPeriodOptions(years) {
   const selector = document.getElementById("period-selector");
   if (!selector || selector.dataset.loadedYears === years.join(",")) return;
-  const current = selector.value || state.period || "last13";
+  const availableYears = [...years].sort();
+  const latestYear = availableYears[availableYears.length - 1] || "2026";
+  const current = selector.value || state.period || `year:${latestYear}`;
+  const recentTwo = availableYears.slice(-2);
+  const recentThree = availableYears.slice(-3);
   selector.innerHTML = `
     <option value="last13">Last 13 months</option>
     <option value="ytd">YTD</option>
-    ${years.map((year) => `<option value="year:${escapeHtml(year)}">${escapeHtml(year)}</option>`).join("")}
+    <optgroup label="Years">
+      ${availableYears
+        .slice()
+        .reverse()
+        .map((year) => `<option value="year:${escapeHtml(year)}">${escapeHtml(year)}</option>`)
+        .join("")}
+    </optgroup>
+    ${
+      recentTwo.length === 2
+        ? `<option value="years:${escapeHtml(recentTwo.join(","))}">${escapeHtml(recentTwo.join(" + "))}</option>`
+        : ""
+    }
+    ${
+      recentThree.length === 3
+        ? `<option value="years:${escapeHtml(recentThree.join(","))}">${escapeHtml(recentThree.join(" + "))}</option>`
+        : ""
+    }
     <option value="all">All</option>
   `;
-  selector.value = [...selector.options].some((option) => option.value === current) ? current : "last13";
+  selector.value = [...selector.options].some((option) => option.value === current) ? current : `year:${latestYear}`;
   selector.dataset.loadedYears = years.join(",");
 }
 
@@ -150,6 +193,97 @@ function percentile(values, pct) {
   if (!sorted.length) return 1;
   const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * pct) - 1);
   return sorted[index];
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function bucketColor(label) {
+  const palette = ["#5a8df0", "#3dd6a3", "#f2b84b", "#c67df3", "#ff7a90", "#74c0fc", "#8ee6c7", "#f59f00", "#a7b9ff", "#7ad7ff"];
+  return palette[hashString(label) % palette.length];
+}
+
+function shortPeriodLabel(period, mode) {
+  if (mode === "year") return period;
+  const [year, month] = period.split("-");
+  const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const name = names[Math.max(0, Math.min(11, Number(month) - 1))] || month;
+  return `${name} '${year.slice(-2)}`;
+}
+
+function bucketTotalsLabel(row) {
+  const category = row.category || "Uncategorized";
+  if (category === "Unknown Card Spend") return "Card spend";
+  if (category === "Home and Furniture") return "Home";
+  if (category === "Banking and Fees") return "Fees";
+  if (category === "Taxes and Government") return "Taxes";
+  if (category === "Inter-account Transfers") return "Transfers";
+  if (category === "Wealth Allocation") return "Investments";
+  return category;
+}
+
+function aggregateFlowRows(rows, mode) {
+  if (mode === "year") {
+    const grouped = new Map();
+    for (const row of rows) {
+      const year = String(row.month).slice(0, 4);
+      const item = grouped.get(year) || { period: year, income: 0, outflow: 0 };
+      item.income += Number(row.real_income || 0);
+      item.outflow += Number(row.household_spend_cashflow || 0);
+      grouped.set(year, item);
+    }
+    return [...grouped.values()];
+  }
+  return rows.map((row) => ({
+    period: row.month,
+    income: Number(row.real_income || 0),
+    outflow: Number(row.household_spend_cashflow || 0),
+  }));
+}
+
+function aggregateBucketRows(rows, mode) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const period = mode === "year" ? String(row.year || row.month || "").slice(0, 4) : row.month;
+    const label = bucketTotalsLabel(row);
+    const key = `${period}|${label}`;
+    const item =
+      grouped.get(key) ||
+      {
+        period,
+        label,
+        outflow: 0,
+        count: 0,
+        confidenceSum: 0,
+        sourceRows: [],
+        subcategories: new Set(),
+      };
+    item.outflow += Number(row.outflow || 0);
+    item.count += Number(row.count || 0);
+    const confidence = Number(row.avg_confidence || 0);
+    if (Number.isFinite(confidence) && confidence > 0) {
+      item.confidenceSum += confidence;
+    }
+    if (row.subcategory) {
+      item.subcategories.add(row.subcategory);
+    }
+    item.sourceRows.push(row);
+    grouped.set(key, item);
+  }
+  return [...grouped.values()].map((item) => ({
+    period: item.period,
+    label: item.label,
+    outflow: item.outflow,
+    count: item.count,
+    avg_confidence: item.count ? item.confidenceSum / item.sourceRows.length : 0,
+    subcategories: [...item.subcategories],
+  }));
 }
 
 function renderBurnChart(months) {
@@ -514,6 +648,29 @@ function handleIncomeCategoryFilterClick(button) {
   }
 }
 
+function handleBucketFilterClick(button) {
+  const filter = button.dataset.bucketFilter;
+  if (filter === "all") {
+    state.bucketFilters = [];
+  } else {
+    const current = new Set(state.bucketFilters);
+    if (current.has(filter)) {
+      current.delete(filter);
+    } else {
+      current.add(filter);
+    }
+    state.bucketFilters = [...current];
+  }
+  renderBucketChart();
+}
+
+function handleBucketModeClick(button) {
+  const mode = button.dataset.bucketMode;
+  if (!mode || mode === state.bucketChartMode) return;
+  state.bucketChartMode = mode;
+  renderBucketChart();
+}
+
 async function handleAuditAction(button) {
   if (state.auditBusy) {
     setAuditStatus("Still saving the last change. One moment...", "info");
@@ -599,7 +756,7 @@ function signal(label, value, detail) {
 }
 
 async function loadOptimization() {
-  const data = await api("/api/dashboard/optimization");
+  const data = await api(`/api/dashboard/optimization?period=${periodQuery()}`);
   state.optimization = data;
   setText("opt-months", data.summary.months_loaded || 0);
   setText("opt-burden", fmtMoney(data.summary.total_burden || 0));
@@ -697,6 +854,7 @@ function renderAmortizations(rows) {
 
 async function loadFlow() {
   const data = await api(`/api/dashboard/monthly-flow?period=${periodQuery()}`);
+  state.flow = data;
   renderTable(
     "flow-table",
     [
@@ -713,6 +871,7 @@ async function loadFlow() {
     ],
     data.months || [],
   );
+  renderBucketChart();
 }
 
 async function loadSpending() {
@@ -739,8 +898,10 @@ async function loadSpending() {
 
 async function loadBuckets() {
   const data = await api(`/api/dashboard/buckets?period=${periodQuery()}`);
+  state.buckets = data;
   renderBucketYearTotals(data.years || []);
   renderBucketMonthTotals(data.months || []);
+  renderBucketChart();
 }
 
 async function loadInsights() {
@@ -951,20 +1112,389 @@ function renderCategoryMonths(rows) {
 }
 
 function bucketLabel(row) {
-  return `${row.category || "Uncategorized"}${row.subcategory ? ` / ${row.subcategory}` : ""}`;
+  return bucketTotalsLabel(row);
+}
+
+const BUCKET_SLICE_GUIDES = {
+  Groceries: ["Supermarket", "Convenience", "Online groceries", "Household basics"],
+  "Eating Out": ["Lunch", "Dinner", "Coffee", "Delivery"],
+  Holiday: ["Flights", "Hotels", "Car rental", "Activities"],
+  Shopping: ["Electronics", "Clothing", "Home goods", "Online shopping"],
+  Transportation: ["Fuel", "Rail", "Parking", "Maintenance"],
+  Education: ["Kids education", "Professional education", "Private lessons", "Camps"],
+  Health: ["Insurance", "Pharmacy", "Doctors", "Fitness"],
+  Home: ["Repairs", "Furniture", "DIY", "Appliances"],
+  Housing: ["Mortgage", "Utilities", "Insurance", "Repairs"],
+  Fees: ["Bank fees", "Interest", "Cash withdrawal"],
+  "Pet Care": ["Vet", "Food", "Boarding", "Supplies"],
+  Other: ["Gifts", "Family support", "One-offs", "Miscellaneous"],
+  Transfers: ["Savings", "Investments", "Current account", "Wise"],
+  Investments: ["Broker cash", "Deposits", "Withdrawals", "Dividends"],
+  "Card spend": ["Supermarket", "Delivery", "Transport", "Shopping"],
+};
+
+function bucketBuckets(rows, periodField = "month") {
+  const grouped = new Map();
+  for (const row of rows) {
+    const period = row.period || row[periodField] || row.month || row.year || "";
+    const label = bucketTotalsLabel(row);
+    const key = `${period}|${label}`;
+    const item =
+      grouped.get(key) ||
+      {
+        period,
+        label,
+        outflow: 0,
+        count: 0,
+        confidenceSum: 0,
+        rowCount: 0,
+        subcategories: new Set(),
+      };
+    item.outflow += Number(row.outflow || 0);
+    item.count += Number(row.count || 0);
+    item.confidenceSum += Number(row.avg_confidence || 0);
+    item.rowCount += 1;
+    if (row.subcategory) item.subcategories.add(row.subcategory);
+    grouped.set(key, item);
+  }
+  return [...grouped.values()].map((item) => ({
+    period: item.period,
+    year: item.period,
+    month: item.period,
+    label: item.label,
+    outflow: item.outflow,
+    count: item.count,
+    avg_confidence: item.rowCount ? item.confidenceSum / item.rowCount : 0,
+    subcategories: [...item.subcategories],
+  }));
+}
+
+function bucketRowLabel(row) {
+  return row.label || bucketLabel(row);
+}
+
+function bucketTrendColor(label) {
+  return bucketColor(label);
+}
+
+function renderBucketVisibilityToggles() {
+  const incomeButton = document.querySelector('[data-bucket-series="income"]');
+  const outflowButton = document.querySelector('[data-bucket-series="outflow"]');
+  if (incomeButton) {
+    incomeButton.classList.toggle("active", state.bucketVisibility.income);
+    incomeButton.setAttribute("aria-pressed", String(state.bucketVisibility.income));
+  }
+  if (outflowButton) {
+    outflowButton.classList.toggle("active", state.bucketVisibility.outflow);
+    outflowButton.setAttribute("aria-pressed", String(state.bucketVisibility.outflow));
+  }
+}
+
+function toggleBucketVisibility(series) {
+  if (!(series in state.bucketVisibility)) return;
+  state.bucketVisibility[series] = !state.bucketVisibility[series];
+  renderBucketChart();
+}
+
+function renderBucketTrendChart() {
+  const target = document.getElementById("bucket-trends");
+  if (!target) return;
+  const rawRows = state.bucketChartMode === "year" ? state.buckets?.years || [] : state.buckets?.months || [];
+  if (!rawRows.length) {
+    target.innerHTML = `<p class="empty">Trend chart appears once bucket data is loaded.</p>`;
+    return;
+  }
+  const bucketRows = aggregateBucketRows(rawRows, state.bucketChartMode);
+  const periods = [...new Set(bucketRows.map((row) => row.period))].sort();
+  const totals = new Map();
+  for (const row of bucketRows) {
+    totals.set(bucketRowLabel(row), (totals.get(bucketRowLabel(row)) || 0) + Number(row.outflow || 0));
+  }
+  const labels = state.bucketFilters.length
+    ? state.bucketFilters
+    : [...totals.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([label]) => label);
+  if (!labels.length || !periods.length) {
+    target.innerHTML = `<p class="empty">Trend chart needs more data.</p>`;
+    return;
+  }
+  const lookup = new Map(bucketRows.map((row) => [`${row.period}|${bucketRowLabel(row)}`, Number(row.outflow || 0)]));
+  const max = Math.max(...periods.flatMap((period) => labels.map((label) => Number(lookup.get(`${period}|${label}`) || 0))), 1);
+  const width = Math.max(760, periods.length * 82 + 96);
+  const height = 300;
+  const left = 56;
+  const right = width - 20;
+  const top = 24;
+  const bottom = 252;
+  const plotHeight = bottom - top;
+  const step = periods.length > 1 ? (right - left) / (periods.length - 1) : 0;
+  const legend = labels
+    .map(
+      (label) => `
+        <button class="bucket-chip ${state.bucketFilters.includes(label) || (!state.bucketFilters.length && totals.get(label) >= 0) ? "active" : ""}" data-bucket-filter="${escapeHtml(label)}">
+          <span class="chip-swatch" style="background: ${bucketTrendColor(label)}"></span>
+          <span class="chip-label">${escapeHtml(label)}</span>
+          <small>${fmtMoney(totals.get(label) || 0)}</small>
+        </button>
+      `,
+    )
+    .join("");
+  target.innerHTML = `
+    <div class="bucket-chart-meta">
+      <div class="bucket-chart-note">Trend lines for the biggest consolidated buckets.</div>
+      <div class="bucket-chart-note">Click a chip to focus the lines.</div>
+    </div>
+    <div class="bucket-chart-scroll">
+      <svg class="bucket-svg trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Bucket trend chart by ${state.bucketChartMode}">
+        <line x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}" class="bucket-axis"></line>
+        <line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" class="bucket-axis"></line>
+        ${labels
+          .map((label) => {
+            const points = periods
+              .map((period, index) => {
+                const value = Number(lookup.get(`${period}|${label}`) || 0);
+                const x = periods.length > 1 ? left + index * step : (left + right) / 2;
+                const y = bottom - Math.round((value / max) * plotHeight);
+                return `${x},${y}`;
+              })
+              .join(" ");
+            return `
+              <polyline points="${points}" fill="none" stroke="${bucketTrendColor(label)}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"></polyline>
+              ${periods
+                .map((period, index) => {
+                  const value = Number(lookup.get(`${period}|${label}`) || 0);
+                  const x = periods.length > 1 ? left + index * step : (left + right) / 2;
+                  const y = bottom - Math.round((value / max) * plotHeight);
+                  return `<circle cx="${x}" cy="${y}" r="3.5" fill="${bucketTrendColor(label)}"><title>${escapeHtml(`${period} · ${label} · ${fmtPrecise(value)}`)}</title></circle>`;
+                })
+                .join("")}
+            `;
+          })
+          .join("")}
+        ${periods
+          .map((period, index) => {
+            const x = periods.length > 1 ? left + index * step : (left + right) / 2;
+            return `<text x="${x}" y="${bottom + 16}" text-anchor="middle" class="bucket-period">${escapeHtml(shortPeriodLabel(period, state.bucketChartMode))}</text>`;
+          })
+          .join("")}
+      </svg>
+    </div>
+    <div class="chip-strip trend-legend">${legend}</div>
+  `;
+}
+
+function renderBucketSliceSuggestions() {
+  const target = document.getElementById("bucket-slices");
+  if (!target) return;
+  const breakdown = state.spending?.breakdown || [];
+  if (!breakdown.length) {
+    target.innerHTML = `<p class="empty">Slice suggestions appear after spending data loads.</p>`;
+    return;
+  }
+  const grouped = new Map();
+  for (const row of breakdown) {
+    const label = bucketTotalsLabel(row);
+    const item =
+      grouped.get(label) ||
+      {
+        label,
+        outflow: 0,
+        subcategories: new Set(),
+      };
+    item.outflow += Number(row.outflow || 0);
+    if (row.subcategory) item.subcategories.add(row.subcategory);
+    grouped.set(label, item);
+  }
+  const candidates = [...grouped.values()]
+    .filter((item) => item.outflow >= 2000 || item.subcategories.size >= 2)
+    .sort((a, b) => b.outflow - a.outflow)
+    .slice(0, 6);
+  if (!candidates.length) {
+    target.innerHTML = `<p class="empty">No buckets are large enough to suggest a split yet.</p>`;
+    return;
+  }
+  target.innerHTML = candidates
+    .map((item) => {
+      const guide = BUCKET_SLICE_GUIDES[item.label] || [];
+      const fromData = [...item.subcategories].filter(Boolean).slice(0, 4);
+      const suggestions = [...new Set([...fromData, ...guide])].slice(0, 4);
+      return `
+        <article class="slice-card">
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <span>${fmtPrecise(item.outflow)} total</span>
+          </div>
+          <div class="slice-suggestions">
+            ${suggestions.map((suggestion) => `<span>${escapeHtml(suggestion)}</span>`).join("")}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderBucketChart() {
+  const chart = document.getElementById("bucket-chart");
+  const chips = document.getElementById("bucket-filter-chips");
+  const modeButtons = document.querySelectorAll("[data-bucket-mode]");
+  if (!chart || !chips) return;
+
+  const flowRows = state.flow?.months || [];
+  const rawBucketRows = state.bucketChartMode === "year" ? state.buckets?.years || [] : state.buckets?.months || [];
+  if (!flowRows.length || !rawBucketRows.length) {
+    chart.innerHTML = `<p class="empty">Loading cashflow chart...</p>`;
+    chips.innerHTML = "";
+    modeButtons.forEach((button) => button.classList.toggle("active", button.dataset.bucketMode === state.bucketChartMode));
+    return;
+  }
+
+  const periods = aggregateFlowRows(flowRows, state.bucketChartMode);
+  const bucketRows = aggregateBucketRows(rawBucketRows, state.bucketChartMode);
+  const bucketTotals = new Map();
+  for (const row of bucketRows) {
+    bucketTotals.set(row.label, (bucketTotals.get(row.label) || 0) + Number(row.outflow || 0));
+  }
+  const labels = [...bucketTotals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([label]) => label);
+  state.bucketFilters = state.bucketFilters.filter((label) => bucketTotals.has(label));
+  const selectedLabels = state.bucketFilters.length ? state.bucketFilters : labels;
+  const showIncome = state.bucketVisibility.income;
+  const showOutflow = state.bucketVisibility.outflow;
+
+  chips.innerHTML = `
+    <button class="bucket-chip ${state.bucketFilters.length === 0 ? "active" : ""}" data-bucket-filter="all">
+      <span class="chip-swatch" style="background: var(--accent-2)"></span>
+      <span class="chip-label">All</span>
+      <small>${fmtMoney(labels.reduce((sum, label) => sum + (bucketTotals.get(label) || 0), 0))}</small>
+    </button>
+    ${labels
+      .map(
+        (label) => `
+          <button class="bucket-chip ${selectedLabels.includes(label) && state.bucketFilters.length ? "active" : ""}" data-bucket-filter="${escapeHtml(label)}">
+            <span class="chip-swatch" style="background: ${bucketColor(label)}"></span>
+            <span class="chip-label">${escapeHtml(label)}</span>
+            <small>${fmtMoney(bucketTotals.get(label) || 0)}</small>
+          </button>
+        `,
+      )
+      .join("")}
+  `;
+
+  modeButtons.forEach((button) => button.classList.toggle("active", button.dataset.bucketMode === state.bucketChartMode));
+  renderBucketVisibilityToggles();
+
+  const periodLookup = new Map();
+  for (const row of bucketRows) {
+    periodLookup.set(`${row.period}|${row.label}`, Number(row.outflow || 0));
+  }
+  const series = periods.map((row) => {
+    const selectedOutflow = selectedLabels.map((label) => ({
+      label,
+      amount: Number(periodLookup.get(`${row.period}|${label}`) || 0),
+    }));
+    const outflow = selectedOutflow.reduce((sum, item) => sum + item.amount, 0);
+    return {
+      period: row.period,
+      income: Number(row.income || 0),
+      outflow,
+      selectedOutflow,
+    };
+  });
+
+  const reference = Math.max(
+    percentile(series.flatMap((row) => [showIncome ? row.income : 0, showOutflow ? row.outflow : 0]), 0.9) * 1.15,
+    1,
+  );
+  const width = Math.max(760, series.length * 82 + 96);
+  const height = 308;
+  const top = 26;
+  const bottom = 276;
+  const axisY = 158;
+  const band = 104;
+  const left = 52;
+  const right = width - 20;
+  const step = series.length ? (right - left) / series.length : 0;
+  const barWidth = Math.min(30, Math.max(14, step * 0.58));
+
+  chart.innerHTML = `
+    <div class="bucket-chart-meta">
+      <div class="bucket-chart-note">Toggle IN / OUT independently, then click chips to focus the buckets.</div>
+      <div class="bucket-chart-note">${state.bucketFilters.length ? `${state.bucketFilters.length} bucket${state.bucketFilters.length === 1 ? "" : "s"} selected` : "All buckets selected"}</div>
+    </div>
+    <div class="bucket-chart-scroll">
+      <svg class="bucket-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Cashflow chart by ${state.bucketChartMode}">
+        <defs>
+          <linearGradient id="bucket-income-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#39d39f"></stop>
+            <stop offset="100%" stop-color="#8ee6c7"></stop>
+          </linearGradient>
+        </defs>
+        <line x1="${left}" y1="${axisY}" x2="${right}" y2="${axisY}" class="bucket-axis"></line>
+        <text x="12" y="${top + 6}" class="bucket-axis-label">${fmtMoney(reference)}</text>
+        <text x="12" y="${axisY + 14}" class="bucket-axis-label">0</text>
+        ${series
+          .map((row, index) => {
+            const center = left + index * step + step / 2;
+            const incomeHeight = showIncome ? Math.round((Math.min(row.income, reference) / reference) * band) : 0;
+            const incomeOverflow = showIncome && row.income > reference;
+            let offset = 0;
+            const outflowSegments = showOutflow
+              ? row.selectedOutflow
+                  .filter((segment) => segment.amount > 0.005)
+                  .map((segment) => {
+                    const segHeight = Math.max(2, Math.round((Math.min(segment.amount, reference) / reference) * band));
+                    const y = axisY + offset;
+                    offset += segHeight;
+                    return `
+                      <rect x="${center - barWidth / 2}" y="${y}" width="${barWidth}" height="${segHeight}" rx="3" fill="${bucketColor(segment.label)}">
+                        <title>${escapeHtml(`${row.period} · ${segment.label} · ${fmtPrecise(segment.amount)}`)}</title>
+                      </rect>
+                    `;
+                  })
+                  .join("")
+              : "";
+            const outflowOverflow = showOutflow && row.outflow > reference;
+            const outflowHeight = showOutflow ? Math.min(band, Math.round((Math.min(row.outflow, reference) / reference) * band)) : 0;
+            const periodTitle = `${row.period}${showIncome ? `\nIN ${fmtPrecise(row.income)}` : ""}${showOutflow ? `\nOUT ${fmtPrecise(row.outflow)}` : ""}${state.bucketFilters.length ? `\nBuckets ${state.bucketFilters.join(", ")}` : ""}`;
+            return `
+              <g>
+                <title>${escapeHtml(periodTitle)}</title>
+                ${showIncome ? `<rect x="${center - barWidth / 2}" y="${axisY - incomeHeight}" width="${barWidth}" height="${incomeHeight}" rx="3" class="bucket-income"></rect>` : ""}
+                ${incomeOverflow ? `<text x="${center}" y="${axisY - band - 6}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
+                ${outflowSegments}
+                ${outflowOverflow ? `<text x="${center}" y="${axisY + outflowHeight + 14}" text-anchor="middle" class="bucket-overflow">›</text>` : ""}
+                <text x="${center}" y="${bottom + 12}" text-anchor="middle" class="bucket-period">${escapeHtml(shortPeriodLabel(row.period, state.bucketChartMode))}</text>
+                ${showIncome ? `<text x="${center}" y="${axisY - incomeHeight - 6}" text-anchor="middle" class="bucket-value">${fmtMoney(row.income)}</text>` : ""}
+                ${showOutflow ? `<text x="${center}" y="${axisY + outflowHeight + 28}" text-anchor="middle" class="bucket-value">${fmtMoney(row.outflow)}</text>` : ""}
+              </g>
+            `;
+          })
+          .join("")}
+      </svg>
+    </div>
+  `;
+  if (!showIncome && !showOutflow) {
+    chart.insertAdjacentHTML("afterbegin", `<p class="empty">Turn IN or OUT back on to view cashflow bars.</p>`);
+  }
+  renderBucketTrendChart();
+  renderBucketSliceSuggestions();
 }
 
 function renderBucketYearTotals(rows) {
+  const consolidated = bucketBuckets(rows, "year");
   renderTable(
     "bucket-years-table",
     [
       { key: "year", label: "Year" },
-      { key: "bucket", label: "Bucket", render: bucketLabel },
+      { key: "label", label: "Bucket", render: (row) => row.label },
       { key: "outflow", label: "Out", number: true, render: (row) => fmtPrecise(row.outflow) },
       { key: "count", label: "Rows", number: true },
       { key: "avg_confidence", label: "Conf.", number: true, render: (row) => fmtPercent(row.avg_confidence) },
     ],
-    rows,
+    consolidated,
   );
 }
 
@@ -974,9 +1504,10 @@ function renderBucketMonthTotals(rows) {
     target.innerHTML = `<p class="empty">No bucket totals yet.</p>`;
     return;
   }
+  const consolidated = bucketBuckets(rows, "month");
   const months = [...new Set(rows.map((row) => row.month))].sort();
-  const buckets = [...new Set(rows.map(bucketLabel))].sort();
-  const lookup = new Map(rows.map((row) => [`${bucketLabel(row)}|${row.month}`, Number(row.outflow || 0)]));
+  const buckets = [...new Set(consolidated.map((row) => row.label))].sort();
+  const lookup = new Map(consolidated.map((row) => [`${row.label}|${row.period}`, Number(row.outflow || 0)]));
   target.innerHTML = `
     <div class="matrix-row bucket-header" style="--month-count:${months.length}"><span>Bucket</span>${months.map((month) => `<span>${escapeHtml(month)}</span>`).join("")}<span>Total</span></div>
     ${buckets
@@ -1307,7 +1838,7 @@ async function refreshAll() {
   setText("side-db-status", "refreshing");
   await loadMetadata();
   await loadFire();
-  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadBuckets(), loadInsights(), loadReview(), loadImports()]);
+  await Promise.all([loadOptimization(), loadFlow(), loadSpending(), loadInsights(), loadReview(), loadImports()]);
   setText("side-db-status", "ready");
 }
 
@@ -1353,6 +1884,9 @@ document.addEventListener("click", (event) => {
   const sortButton = target.closest(".sort-button");
   const incomeSortButton = target.closest(".sort-income-button");
   const categoryFilterButton = target.closest(".category-filter-btn");
+  const bucketFilterButton = target.closest("[data-bucket-filter]");
+  const bucketModeButton = target.closest("[data-bucket-mode]");
+  const bucketSeriesButton = target.closest("[data-bucket-series]");
   const auditActionButton = target.closest("[data-audit-action]");
   if (reviewDetailsButton) {
     event.preventDefault();
@@ -1389,6 +1923,18 @@ document.addEventListener("click", (event) => {
   if (categoryFilterButton && target.closest("#month-income-panel")) {
     event.preventDefault();
     handleIncomeCategoryFilterClick(categoryFilterButton);
+  }
+  if (bucketFilterButton) {
+    event.preventDefault();
+    handleBucketFilterClick(bucketFilterButton);
+  }
+  if (bucketModeButton) {
+    event.preventDefault();
+    handleBucketModeClick(bucketModeButton);
+  }
+  if (bucketSeriesButton) {
+    event.preventDefault();
+    toggleBucketVisibility(bucketSeriesButton.dataset.bucketSeries);
   }
   if (auditActionButton) {
     event.preventDefault();

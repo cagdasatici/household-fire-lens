@@ -596,6 +596,201 @@ th.number {
   border-radius: 8px;
 }
 
+.bucket-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.segmented-control {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0f151c;
+}
+
+.segmented {
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 0;
+  min-height: 38px;
+  padding: 8px 14px;
+}
+
+.segmented:last-child {
+  border-right: 0;
+}
+
+.segmented.active {
+  background: var(--accent);
+  color: #0a1410;
+  font-weight: 700;
+}
+
+.series-toggle .segmented.active {
+  background: var(--accent-3);
+  color: #1b1510;
+}
+
+.chip-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 320px;
+}
+
+.bucket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  min-height: 36px;
+  border-radius: 999px;
+  background: #0f151c;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.bucket-chip.active {
+  border-color: rgba(61, 214, 163, 0.6);
+  background: rgba(61, 214, 163, 0.1);
+  color: var(--ink);
+}
+
+.bucket-chip .chip-label {
+  white-space: nowrap;
+}
+
+.bucket-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chip-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  flex: 0 0 auto;
+}
+
+.bucket-chart {
+  display: grid;
+  gap: 10px;
+}
+
+.trend-svg {
+  min-width: 760px;
+}
+
+.bucket-chart-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bucket-chart-note {
+  color: var(--muted);
+}
+
+.trend-legend {
+  margin-top: 8px;
+}
+
+.slice-list {
+  display: grid;
+  gap: 10px;
+}
+
+.slice-card {
+  border: 1px solid var(--line);
+  background: var(--panel-3);
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.slice-card strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.slice-card span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.slice-suggestions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.slice-suggestions span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+}
+
+.bucket-chart-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-3);
+}
+
+.bucket-svg {
+  display: block;
+  width: 100%;
+  min-width: 760px;
+  height: auto;
+  background: linear-gradient(180deg, rgba(61, 214, 163, 0.03), transparent 60%);
+}
+
+.bucket-axis {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.bucket-axis-label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.bucket-period {
+  fill: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bucket-value {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.bucket-overflow {
+  fill: var(--accent-3);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.bucket-income {
+  fill: url(#bucket-income-gradient);
+}
+
 .wide-matrix {
   max-height: 620px;
 }

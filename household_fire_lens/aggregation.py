@@ -46,6 +46,32 @@ def months_between(start_month: str, end_month: str) -> Iterable[str]:
         current = month_add(current, 1)
 
 
+def _period_years(period: str, snapshots: List[Dict[str, Any]]) -> List[str]:
+    if not snapshots:
+        return []
+    period = (period or "last13").strip()
+    all_years = sorted({str(row["month"])[:4] for row in snapshots})
+    latest_year = all_years[-1]
+    if period in {"all", "last13"}:
+        return all_years
+    if period == "ytd":
+        return [latest_year]
+    if period.startswith("year:"):
+        year = period.split(":", 1)[1]
+        return [year]
+    if period.startswith("years:"):
+        years = [year.strip() for year in period.split(":", 1)[1].split(",") if year.strip()]
+        return years
+    if period.startswith("last") and period.endswith("years"):
+        digits = "".join(ch for ch in period if ch.isdigit())
+        count = int(digits or "0")
+        if count > 0:
+            return all_years[-count:]
+    if period.isdigit() and len(period) == 4:
+        return [period]
+    return all_years
+
+
 def recompute_monthly_snapshots(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     conn.execute("DELETE FROM monthly_snapshots")
     suggest_amortization_rules(conn)
@@ -391,6 +417,17 @@ def filter_snapshots_for_period(snapshots: List[Dict[str, Any]], period: str = "
     if period.startswith("year:"):
         year = period.split(":", 1)[1]
         return [row for row in snapshots if str(row["month"]).startswith(year)]
+    if period.startswith("years:"):
+        years = {year.strip() for year in period.split(":", 1)[1].split(",") if year.strip()}
+        return [row for row in snapshots if str(row["month"])[:4] in years]
+    if period.startswith("last") and period.endswith("years"):
+        digits = "".join(ch for ch in period if ch.isdigit())
+        count = int(digits or "0")
+        if count > 0:
+            years = set(_period_years(period, snapshots))
+            return [row for row in snapshots if str(row["month"])[:4] in years]
+    if period.isdigit() and len(period) == 4:
+        return [row for row in snapshots if str(row["month"]).startswith(period)]
     return snapshots[-13:]
 
 
@@ -493,7 +530,8 @@ def spending_breakdown(conn: sqlite3.Connection, period: str = "last13") -> Dict
     }
 
 
-def recurring_merchants(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def recurring_merchants(conn: sqlite3.Connection, period: str = "last13") -> List[Dict[str, Any]]:
+    start_month, end_month = period_bounds_from_snapshots(conn, period)
     rows = conn.execute(
         """
         SELECT
@@ -507,8 +545,10 @@ def recurring_merchants(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         WHERE nt.is_duplicate = 0
           AND nt.amount < 0
           AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
         GROUP BY merchant, category, month
-        """
+        """,
+        (start_month, end_month),
     ).fetchall()
     grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for row in rows:
@@ -553,10 +593,10 @@ def recurring_merchants(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return recurring
 
 
-def optimization_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
-    snapshots = list_monthly_snapshots(conn)
-    breakdown = spending_breakdown(conn)["breakdown"]
-    recurring = recurring_merchants(conn)
+def optimization_insights(conn: sqlite3.Connection, period: str = "last13") -> Dict[str, Any]:
+    snapshots = filter_snapshots_for_period(list_monthly_snapshots(conn), period)
+    breakdown = spending_breakdown(conn, period)["breakdown"]
+    recurring = recurring_merchants(conn, period)
     category_rows = [
         row
         for row in breakdown
@@ -583,14 +623,14 @@ def optimization_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
             }
         )
     opportunities.sort(key=lambda row: row["score"], reverse=True)
-    trend_alerts = category_trends(conn)
+    trend_alerts = category_trends(conn, period)
     amortization = list_amortization_rules(conn)
     return {
         "opportunities": opportunities[:8],
         "recurring": recurring[:12],
         "trend_alerts": trend_alerts[:8],
         "amortization_rules": amortization,
-        "snapshot": fire_snapshot(conn),
+        "snapshot": fire_snapshot(conn, period=period),
         "summary": {
             "months_loaded": len(snapshots),
             "total_burden": money(total_burden),
@@ -600,7 +640,8 @@ def optimization_insights(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
-def category_trends(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def category_trends(conn: sqlite3.Connection, period: str = "last13") -> List[Dict[str, Any]]:
+    start_month, end_month = period_bounds_from_snapshots(conn, period)
     rows = conn.execute(
         """
         SELECT
@@ -611,9 +652,11 @@ def category_trends(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
         JOIN transaction_annotations ta ON ta.transaction_id = nt.id
         WHERE nt.is_duplicate = 0
           AND ta.economic_class IN ('household_spend', 'debt_service')
+          AND substr(nt.transaction_date, 1, 7) BETWEEN ? AND ?
         GROUP BY month, category
         ORDER BY month
-        """
+        """,
+        (start_month, end_month),
     ).fetchall()
     months = sorted({row["month"] for row in rows})
     if len(months) < 4:

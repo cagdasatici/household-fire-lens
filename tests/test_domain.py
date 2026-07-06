@@ -2,7 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from household_fire_lens.aggregation import fire_snapshot, optimization_insights, recompute_monthly_snapshots, spending_insights, spending_story
+from household_fire_lens.aggregation import (
+    fire_snapshot,
+    filter_snapshots_for_period,
+    optimization_insights,
+    recompute_monthly_snapshots,
+    spending_insights,
+    spending_story,
+)
 from household_fire_lens.classifier import classify_all, create_rule_from_review
 from household_fire_lens.database import connect_database
 from household_fire_lens.entity_resolver import candidate_merchants_for_enrichment, is_lookup_safe, resolve_merchant, store_user_entity_mapping
@@ -347,6 +354,39 @@ class DomainTests(unittest.TestCase):
         categories = {item["category"] for item in insights["opportunities"]}
         self.assertIn("Unknown Card Spend", categories)
         self.assertGreaterEqual(insights["summary"]["months_loaded"], 3)
+
+    def test_optimization_insights_follow_selected_period(self):
+        csv_text = """Date,Account,Description,Counterparty,Amount,Currency
+2025-11-01,Main,Hotel booking,Booking.com,-100.00,EUR
+2026-01-01,Main,Hotel booking,Booking.com,-200.00,EUR
+2026-02-01,Main,Hotel booking,Booking.com,-300.00,EUR
+"""
+        import_csv(
+            self.conn,
+            "synthetic-optimization-period.csv",
+            csv_text.encode("utf-8"),
+            institution="generic",
+            account_role="checking",
+        )
+        classify_all(self.conn)
+        recompute_monthly_snapshots(self.conn)
+        all_period = optimization_insights(self.conn, "all")
+        year_2026 = optimization_insights(self.conn, "year:2026")
+        self.assertEqual(all_period["summary"]["months_loaded"], 3)
+        self.assertEqual(year_2026["summary"]["months_loaded"], 2)
+        self.assertLess(year_2026["summary"]["months_loaded"], all_period["summary"]["months_loaded"])
+
+    def test_filter_snapshots_supports_multi_year_combinations(self):
+        snapshots = [
+            {"month": "2024-12"},
+            {"month": "2025-01"},
+            {"month": "2025-12"},
+            {"month": "2026-02"},
+        ]
+        combined = filter_snapshots_for_period(snapshots, "years:2025,2026")
+        three_years = filter_snapshots_for_period(snapshots, "last3years")
+        self.assertEqual([row["month"] for row in combined], ["2025-01", "2025-12", "2026-02"])
+        self.assertEqual([row["month"] for row in three_years], ["2024-12", "2025-01", "2025-12", "2026-02"])
 
     def test_spending_insights_cover_all_adjacent_year_pairs(self):
         csv_text = """Date,Account,Description,Counterparty,Amount,Currency

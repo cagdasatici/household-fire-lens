@@ -182,8 +182,9 @@ class HouseholdFireLensHandler(BaseHTTPRequestHandler):
             sort = (query.get("sort") or ["amount"])[0]
             self.send_json({"month": month, "rows": self.month_income(month, sort)})
         elif path == "/api/dashboard/optimization":
+            period = (query.get("period") or ["last13"])[0]
             recompute_monthly_snapshots(self.conn)
-            self.send_json(optimization_insights(self.conn))
+            self.send_json(optimization_insights(self.conn, period))
         elif path == "/api/dashboard/insights":
             period = (query.get("period") or ["all"])[0]
             self.send_json({**spending_insights(self.conn, period), "story": spending_story(self.conn)})
